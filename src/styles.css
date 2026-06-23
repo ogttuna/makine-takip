@@ -301,6 +301,29 @@ h2 {
   min-height: 280px;
 }
 
+.chart-tooltip-title {
+  margin-bottom: 5px;
+  color: #111827;
+  font-size: 0.76rem;
+  font-weight: 900;
+}
+
+.chart-tooltip-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 220px;
+  color: #334155;
+  font-size: 0.76rem;
+}
+
+.chart-tooltip-row strong {
+  color: #111827;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-weight: 800;
+}
+
 .chart-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

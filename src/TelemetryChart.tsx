@@ -10,7 +10,10 @@ import {
   type TooltipComponentOption,
 } from "echarts/components";
 import * as echarts from "echarts/core";
-import type { YAXisComponentOption } from "echarts";
+import type {
+  TooltipComponentFormatterCallbackParams,
+  YAXisComponentOption,
+} from "echarts";
 import type { ComposeOption, EChartsType } from "echarts/core";
 import { CanvasRenderer } from "echarts/renderers";
 import { useEffect, useMemo, useRef } from "react";
@@ -45,6 +48,20 @@ type AxisKind = "main" | "vacuum";
 type AxisLayout = {
   indexByKind: Partial<Record<AxisKind, number>>;
   yAxis: YAXisComponentOption[];
+};
+
+type ChartDatum = {
+  value: [string, number | null];
+  rawText?: string;
+  displayValue?: string;
+};
+
+type TooltipDatumParam = {
+  axisValue?: unknown;
+  data?: unknown;
+  marker?: unknown;
+  seriesName?: unknown;
+  value?: unknown;
 };
 
 echarts.use([
@@ -163,8 +180,7 @@ export function TelemetryChart({
             width: 1,
           },
         },
-        valueFormatter: (value) =>
-          typeof value === "number" ? value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "") : String(value),
+        formatter: formatTooltip,
       },
       dataZoom,
       xAxis: {
@@ -236,7 +252,7 @@ function buildSeries(
         emphasis: {
           disabled: true,
         },
-        data: shelfAverageLineData(samples, eventByFrameChannel),
+        data: shelfAverageLineData(samples, eventByFrameChannel) as LineSeriesOption["data"],
       });
       continue;
     }
@@ -245,8 +261,8 @@ function buildSeries(
       (point) => point.quality === "good",
     );
     const markerValue = median(channelValues.map((point) => point.value));
-    const lineData: Array<[string, number | null]> = [];
-    const suspectData: Array<[string, number, string]> = [];
+    const lineData: ChartDatum[] = [];
+    const suspectData: ChartDatum[] = [];
     let previousTimestamp: number | null = null;
 
     for (const sample of samples) {
@@ -258,14 +274,14 @@ function buildSeries(
       const isGap = previousTimestamp !== null && timestampMs - previousTimestamp > 240_000;
 
       if (isGap && previousTimestamp !== null) {
-        lineData.push([new Date(previousTimestamp + 1).toISOString(), null]);
-        lineData.push([new Date(timestampMs - 1).toISOString(), null]);
+        lineData.push({ value: [new Date(previousTimestamp + 1).toISOString(), null] });
+        lineData.push({ value: [new Date(timestampMs - 1).toISOString(), null] });
       }
 
       previousTimestamp = Number.isFinite(timestampMs) ? timestampMs : previousTimestamp;
 
       if (!measurement || measurement.numeric_value === null) {
-        lineData.push([timestamp, null]);
+        lineData.push({ value: [timestamp, null] });
         continue;
       }
 
@@ -274,16 +290,19 @@ function buildSeries(
         eventByFrameChannel.has(`${sample.id}:${channel}`);
 
       if (isSuspect) {
-        lineData.push([timestamp, null]);
-        suspectData.push([
-          timestamp,
-          markerValue ?? measurement.numeric_value,
-          `${channel}: ${measurement.raw_text}`,
-        ]);
+        lineData.push({ value: [timestamp, null] });
+        suspectData.push({
+          value: [timestamp, markerValue ?? measurement.numeric_value],
+          rawText: measurement.raw_text,
+          displayValue: `${measurement.raw_text} suspect`,
+        });
         continue;
       }
 
-      lineData.push([timestamp, measurement.numeric_value]);
+      lineData.push({
+        value: [timestamp, measurement.numeric_value],
+        rawText: measurement.raw_text,
+      });
     }
 
     result.push({
@@ -302,7 +321,7 @@ function buildSeries(
       emphasis: {
         disabled: true,
       },
-      data: lineData,
+      data: lineData as LineSeriesOption["data"],
     });
 
     if (suspectData.length > 0) {
@@ -312,7 +331,7 @@ function buildSeries(
         yAxisIndex: axisIndexFor(axisLayout, config.axis),
         symbol: "diamond",
         symbolSize: 10,
-        data: suspectData,
+        data: suspectData as ScatterSeriesOption["data"],
         itemStyle: {
           color: "#b91c1c",
         },
@@ -387,8 +406,8 @@ function seriesName(config: ReturnType<typeof getChannelConfig>): string {
 function shelfAverageLineData(
   samples: SampleFrame[],
   eventByFrameChannel: Set<string>,
-): Array<[string, number | null]> {
-  const lineData: Array<[string, number | null]> = [];
+): ChartDatum[] {
+  const lineData: ChartDatum[] = [];
   let previousTimestamp: number | null = null;
 
   for (const sample of samples) {
@@ -397,8 +416,8 @@ function shelfAverageLineData(
     const isGap = previousTimestamp !== null && timestampMs - previousTimestamp > 240_000;
 
     if (isGap && previousTimestamp !== null) {
-      lineData.push([new Date(previousTimestamp + 1).toISOString(), null]);
-      lineData.push([new Date(timestampMs - 1).toISOString(), null]);
+      lineData.push({ value: [new Date(previousTimestamp + 1).toISOString(), null] });
+      lineData.push({ value: [new Date(timestampMs - 1).toISOString(), null] });
     }
 
     previousTimestamp = Number.isFinite(timestampMs) ? timestampMs : previousTimestamp;
@@ -421,16 +440,102 @@ function shelfAverageLineData(
     });
 
     if (values.length === 0) {
-      lineData.push([timestamp, null]);
+      lineData.push({ value: [timestamp, null] });
       continue;
     }
 
     const average =
       values.reduce((total, value) => total + value, 0) / values.length;
-    lineData.push([timestamp, average]);
+    lineData.push({
+      value: [timestamp, average],
+      displayValue: average.toString(),
+    });
   }
 
   return lineData;
+}
+
+function formatTooltip(params: TooltipComponentFormatterCallbackParams): string {
+  const items = (Array.isArray(params) ? params : [params])
+    .map((item) => item as TooltipDatumParam)
+    .map((item) => {
+      const value = tooltipDisplayValue(item);
+
+      if (!value) {
+        return null;
+      }
+
+      const marker = typeof item.marker === "string" ? item.marker : "";
+      const seriesName = typeof item.seriesName === "string" ? item.seriesName : "";
+
+      return `<div class="chart-tooltip-row">${marker}<span>${escapeHtml(seriesName)}</span><strong>${escapeHtml(value)}</strong></div>`;
+    })
+    .filter((item): item is string => item !== null);
+
+  if (items.length === 0) {
+    return "";
+  }
+
+  return [
+    `<div class="chart-tooltip-title">${escapeHtml(tooltipTitle(params))}</div>`,
+    ...items,
+  ].join("");
+}
+
+function tooltipTitle(params: TooltipComponentFormatterCallbackParams): string {
+  const first = (Array.isArray(params) ? params[0] : params) as
+    | TooltipDatumParam
+    | undefined;
+
+  if (!first) {
+    return "";
+  }
+
+  const value = Array.isArray(first.value) ? first.value[0] : first.axisValue;
+  return value === undefined || value === null ? "" : String(value);
+}
+
+function tooltipDisplayValue(item: TooltipDatumParam): string | null {
+  const data = chartDatumFrom(item.data);
+
+  if (data?.displayValue) {
+    return data.displayValue;
+  }
+
+  if (data?.rawText) {
+    return data.rawText;
+  }
+
+  const value = data?.value[1] ?? (Array.isArray(item.value) ? item.value[1] : item.value);
+
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  return typeof value === "number" ? value.toString() : String(value);
+}
+
+function chartDatumFrom(data: unknown): ChartDatum | null {
+  if (!data || typeof data !== "object" || !("value" in data)) {
+    return null;
+  }
+
+  const value = (data as { value?: unknown }).value;
+
+  if (!Array.isArray(value) || value.length < 2) {
+    return null;
+  }
+
+  return data as ChartDatum;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function formatAxisTime(value: number | string): string {
