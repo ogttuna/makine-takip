@@ -86,7 +86,7 @@ export function TelemetryChart({
       grid: {
         top: 86,
         right: 76,
-        bottom: 48,
+        bottom: 78,
         left: 58,
       },
       legend: {
@@ -108,6 +108,28 @@ export function TelemetryChart({
       dataZoom: [
         {
           type: "inside",
+          throttle: 80,
+        },
+        {
+          type: "slider",
+          bottom: 18,
+          height: 24,
+          borderColor: "#d7dde8",
+          brushSelect: false,
+          fillerColor: "rgba(8, 145, 178, 0.14)",
+          handleSize: 16,
+          moveHandleSize: 6,
+          selectedDataBackground: {
+            lineStyle: {
+              color: "#0891b2",
+            },
+            areaStyle: {
+              color: "rgba(8, 145, 178, 0.08)",
+            },
+          },
+          textStyle: {
+            color: "#667085",
+          },
           throttle: 80,
         },
       ],
@@ -226,6 +248,9 @@ function buildSeries(
       showSymbol: false,
       smooth: 0.15,
       connectNulls: false,
+      emphasis: {
+        focus: "series",
+      },
       data: lineData,
     });
 
@@ -237,6 +262,9 @@ function buildSeries(
         symbol: "diamond",
         symbolSize: 10,
         data: suspectData,
+        emphasis: {
+          focus: "series",
+        },
         tooltip: {
           valueFormatter: (_value) => "suspect",
         },

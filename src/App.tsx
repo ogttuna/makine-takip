@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 
 import {
   fetchQualityEvents,
@@ -11,9 +11,12 @@ import {
 } from "./api";
 import type { ImportReport, QualityEvent, RunSummary, SampleFrame } from "./api";
 import { getChannelConfig, sortChannels } from "./channelConfig";
-import { TelemetryChart } from "./TelemetryChart";
 
 type QualityFilter = "all" | "time_gap" | "suspect_value";
+
+const TelemetryChart = lazy(() =>
+  import("./TelemetryChart").then((module) => ({ default: module.TelemetryChart })),
+);
 
 export function App() {
   const queryClient = useQueryClient();
@@ -121,9 +124,12 @@ export function App() {
           <h1>Run Review</h1>
           <p>Local CSV workspace for freeze dry telemetry.</p>
         </div>
-        <div className="connection-strip">
+        <div className="connection-strip" aria-busy={isRefreshing}>
           <div className="connection-state">
-            <span className={runsQuery.isError ? "status-dot" : "status-dot online"} />
+            <span
+              aria-hidden="true"
+              className={runsQuery.isError ? "status-dot" : "status-dot online"}
+            />
             <div>
               <strong>{sourceLabel}</strong>
               <span>{getCollectorUrl()}</span>
@@ -217,11 +223,27 @@ export function App() {
               title="No channels selected"
             />
           ) : (
-            <TelemetryChart
-              qualityEvents={qualityEvents}
-              samples={samples}
-              visibleChannels={activeVisibleChannels}
-            />
+            <>
+              <div className="chart-hints" aria-label="Chart interaction hints">
+                <span>Wheel or pinch to zoom</span>
+                <span>Drag to pan</span>
+                <span>Use the slider for range</span>
+              </div>
+              <Suspense
+                fallback={
+                  <ChartState
+                    message="Preparing the chart canvas."
+                    title="Loading chart"
+                  />
+                }
+              >
+                <TelemetryChart
+                  qualityEvents={qualityEvents}
+                  samples={samples}
+                  visibleChannels={activeVisibleChannels}
+                />
+              </Suspense>
+            </>
           )}
         </div>
 
@@ -274,11 +296,21 @@ function ImportPanel({
   onUpload: (file: File) => void;
 }) {
   const [isDragActive, setIsDragActive] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
   const handleFile = (file: File | undefined) => {
-    if (file && !isPending) {
-      onUpload(file);
+    if (!file || isPending) {
+      return;
     }
+
+    if (!file.name.toLowerCase().endsWith(".csv")) {
+      setLocalError("Use a .csv machine log file.");
+      return;
+    }
+
+    setLocalError(null);
+    onUpload(file);
   };
+  const errorMessage = localError ?? error?.message ?? null;
 
   return (
     <section className="import-panel">
@@ -309,6 +341,7 @@ function ImportPanel({
       >
         <input
           accept=".csv,text/csv"
+          aria-label="Choose CSV file"
           disabled={isPending}
           onChange={(event) => {
             const file = event.currentTarget.files?.[0];
@@ -321,7 +354,7 @@ function ImportPanel({
         <span>Semicolon-delimited machine log.</span>
       </label>
       {lastReport ? <ImportReportView report={lastReport} /> : null}
-      {error ? <p className="error-text">{error.message}</p> : null}
+      {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
     </section>
   );
 }
@@ -442,6 +475,7 @@ function ChannelControls({
 
           return (
             <button
+              aria-pressed={active}
               className={active ? "channel-button active" : "channel-button"}
               key={channel}
               onClick={() => {
@@ -659,6 +693,7 @@ function FilterButton({
 }) {
   return (
     <button
+      aria-pressed={active}
       className={active ? "filter-button active" : "filter-button"}
       onClick={onClick}
       type="button"
@@ -683,7 +718,10 @@ function ChartState({
   tone?: "idle" | "error";
 }) {
   return (
-    <div className={tone === "error" ? "chart-state error" : "chart-state"}>
+    <div
+      className={tone === "error" ? "chart-state error" : "chart-state"}
+      role={tone === "error" ? "alert" : "status"}
+    >
       <strong>{title}</strong>
       <span>{message}</span>
       {actionLabel && onAction ? (
@@ -707,7 +745,7 @@ function InlineError({
   title: string;
 }) {
   return (
-    <div className="inline-error">
+    <div className="inline-error" role="alert">
       <strong>{title}</strong>
       <span>{message}</span>
       <button onClick={onAction} type="button">

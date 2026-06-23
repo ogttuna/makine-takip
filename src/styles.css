@@ -31,9 +31,31 @@ button {
   cursor: pointer;
 }
 
+a {
+  color: inherit;
+}
+
 button:disabled,
 input:disabled {
   cursor: not-allowed;
+}
+
+button,
+a,
+.file-drop {
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease,
+    color 140ms ease,
+    box-shadow 140ms ease,
+    transform 140ms ease;
+}
+
+button:focus-visible,
+a:focus-visible,
+.file-drop:focus-within {
+  outline: 3px solid rgba(8, 145, 178, 0.24);
+  outline-offset: 2px;
 }
 
 code {
@@ -191,6 +213,12 @@ h2 {
   padding: 16px;
 }
 
+.metric:hover,
+.chart-panel:hover,
+.side-panel:hover {
+  border-color: #c4d0df;
+}
+
 .metric span {
   color: #667085;
   font-size: 0.82rem;
@@ -265,6 +293,23 @@ h2 {
   width: 100%;
   height: min(62vh, 640px);
   min-height: 420px;
+}
+
+.chart-hints {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+
+.chart-hints span {
+  border: 1px solid #e2e8f0;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #667085;
+  padding: 4px 8px;
+  font-size: 0.76rem;
+  font-weight: 800;
 }
 
 .chart-state,
@@ -375,6 +420,14 @@ h2 {
   padding: 5px 9px;
   font-size: 0.78rem;
   font-weight: 800;
+}
+
+.channel-quick-actions button:active,
+.channel-button:active,
+.filter-button:active,
+.ghost-button:active,
+.export-link:active {
+  transform: translateY(1px);
 }
 
 .channel-button {
@@ -514,6 +567,11 @@ h2 {
   background: #f8fafc;
   padding: 14px;
   overflow: hidden;
+}
+
+.file-drop:hover {
+  border-color: #0891b2;
+  background: #f1fdff;
 }
 
 .file-drop.active {
@@ -658,6 +716,10 @@ h2 {
   padding: 9px 0;
 }
 
+.quality-event:hover {
+  background: rgba(255, 255, 255, 0.5);
+}
+
 .quality-event:first-child {
   border-top: 0;
 }
@@ -754,5 +816,13 @@ h2 {
 
   .telemetry-chart {
     height: 420px;
+  }
+
+  .chart-hints {
+    gap: 6px;
+  }
+
+  .chart-hints span {
+    font-size: 0.72rem;
   }
 }
