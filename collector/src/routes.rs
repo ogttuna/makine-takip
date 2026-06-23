@@ -82,6 +82,9 @@ struct QualityEventsResponse {
 struct QualityEventResponse {
     id: i64,
     frame_id: Option<i64>,
+    sampled_at: Option<String>,
+    source_timestamp_text: Option<String>,
+    source_row_number: Option<i64>,
     channel_code: Option<String>,
     event_type: String,
     severity: String,
@@ -351,15 +354,19 @@ async fn run_quality_events(
         SELECT
             q.id,
             q.frame_id,
+            f.sampled_at,
+            f.source_timestamp_text,
+            f.source_row_number,
             c.code AS channel_code,
             q.event_type,
             q.severity,
             q.message,
             q.metadata_json
         FROM quality_events q
+        LEFT JOIN sample_frames f ON f.id = q.frame_id
         LEFT JOIN channels c ON c.id = q.channel_id
         WHERE q.run_id = ?1
-        ORDER BY q.id ASC
+        ORDER BY f.sampled_at ASC, q.id ASC
         "#,
     )
     .bind(id)

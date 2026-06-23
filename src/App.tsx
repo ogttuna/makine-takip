@@ -10,7 +10,7 @@ import {
   uploadCsv,
 } from "./api";
 import type { ImportReport, QualityEvent, RunSummary, SampleFrame } from "./api";
-import { sortChannels } from "./channelConfig";
+import { getChannelConfig, sortChannels } from "./channelConfig";
 import { TelemetryChart } from "./TelemetryChart";
 
 export function App() {
@@ -245,28 +245,55 @@ function ChannelControls({
     return null;
   }
 
-  return (
-    <div className="channel-controls">
-      {channels.map((channel) => {
-        const active = visibleChannels.includes(channel);
+  const chooseGroup = (group: ReturnType<typeof getChannelConfig>["group"]) => {
+    onChange(
+      sortChannels(
+        channels.filter((channel) => getChannelConfig(channel).group === group),
+      ),
+    );
+  };
 
-        return (
-          <button
-            className={active ? "channel-button active" : "channel-button"}
-            key={channel}
-            onClick={() => {
-              if (active) {
-                onChange(visibleChannels.filter((item) => item !== channel));
-              } else {
-                onChange(sortChannels([...visibleChannels, channel]));
-              }
-            }}
-            type="button"
-          >
-            {channel}
-          </button>
-        );
-      })}
+  return (
+    <div className="channel-control-shell">
+      <div className="channel-quick-actions">
+        <button onClick={() => onChange(channels)} type="button">
+          All
+        </button>
+        <button onClick={() => chooseGroup("shelf")} type="button">
+          Shelves
+        </button>
+        <button onClick={() => chooseGroup("pressure")} type="button">
+          Pressure
+        </button>
+        <button onClick={() => chooseGroup("cooling")} type="button">
+          Cooling
+        </button>
+        <button onClick={() => onChange([])} type="button">
+          Clear
+        </button>
+      </div>
+      <div className="channel-controls">
+        {channels.map((channel) => {
+          const active = visibleChannels.includes(channel);
+
+          return (
+            <button
+              className={active ? "channel-button active" : "channel-button"}
+              key={channel}
+              onClick={() => {
+                if (active) {
+                  onChange(visibleChannels.filter((item) => item !== channel));
+                } else {
+                  onChange(sortChannels([...visibleChannels, channel]));
+                }
+              }}
+              type="button"
+            >
+              {channel}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -342,6 +369,7 @@ function QualitySummary({ events }: { events: QualityEvent[] }) {
     acc[event.event_type] = (acc[event.event_type] ?? 0) + 1;
     return acc;
   }, {});
+  const visibleEvents = events.slice(0, 16);
 
   return (
     <div className="quality-summary">
@@ -358,6 +386,24 @@ function QualitySummary({ events }: { events: QualityEvent[] }) {
           ))}
         </dl>
       )}
+      {visibleEvents.length > 0 ? (
+        <ul className="quality-event-list">
+          {visibleEvents.map((event) => (
+            <li className="quality-event" key={event.id}>
+              <div>
+                <strong>{qualityEventLabel(event.event_type)}</strong>
+                <span>
+                  {event.channel_code ?? "run"} - {qualityEventTimeLabel(event)}
+                </span>
+              </div>
+              <p>{event.message}</p>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {events.length > visibleEvents.length ? (
+        <span>{events.length - visibleEvents.length} more warnings hidden.</span>
+      ) : null}
     </div>
   );
 }
@@ -380,6 +426,27 @@ function runRangeLabel(run: RunSummary | null): string {
   }
 
   return `${formatDate(run.started_at)} - ${formatDate(run.finished_at)}`;
+}
+
+function qualityEventLabel(eventType: string): string {
+  if (eventType === "time_gap") {
+    return "Time gap";
+  }
+
+  if (eventType === "suspect_value") {
+    return "Suspect value";
+  }
+
+  return eventType;
+}
+
+function qualityEventTimeLabel(event: QualityEvent): string {
+  const rowLabel =
+    event.source_row_number !== null ? `row ${event.source_row_number}` : null;
+  const timeLabel =
+    event.source_timestamp_text ?? (event.sampled_at ? formatDate(event.sampled_at) : null);
+
+  return [timeLabel, rowLabel].filter(Boolean).join(" - ") || "no timestamp";
 }
 
 function formatDate(value: string): string {

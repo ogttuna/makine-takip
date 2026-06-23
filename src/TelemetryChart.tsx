@@ -115,6 +115,8 @@ export function TelemetryChart({
         type: "time",
         axisLabel: {
           color: "#667085",
+          formatter: formatAxisTime,
+          hideOverlap: true,
         },
         axisLine: {
           lineStyle: {
@@ -244,6 +246,19 @@ function buildSeries(
   }
 
   return { colors, series: result };
+}
+
+function formatAxisTime(value: number | string): string {
+  const timestamp = typeof value === "number" ? value : Date.parse(value);
+
+  if (!Number.isFinite(timestamp)) {
+    return String(value);
+  }
+
+  return new Intl.DateTimeFormat("tr-TR", {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(timestamp));
 }
 
 function numericValuesForChannel(samples: SampleFrame[], channel: string) {

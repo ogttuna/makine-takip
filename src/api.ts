@@ -48,6 +48,9 @@ export const sampleFrameSchema = z.object({
 export const qualityEventSchema = z.object({
   id: z.number(),
   frame_id: z.number().nullable(),
+  sampled_at: z.string().nullable(),
+  source_timestamp_text: z.string().nullable(),
+  source_row_number: z.number().nullable(),
   channel_code: z.string().nullable(),
   event_type: z.string(),
   severity: z.string(),
