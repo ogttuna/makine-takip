@@ -1,7 +1,7 @@
 # FreezeDryMachine
 
 Freeze dry makinasindan alinan proses verilerini toplamak, yerel olarak saklamak
-ve grafiklerle izlemek icin masaustu odakli bir veri toplama uygulamasi.
+ve grafiklerle izlemek icin web-oncelikli yerel veri toplama uygulamasi.
 
 ## Durum
 
@@ -11,14 +11,14 @@ Bu repo su an calisan bir ilk iskelet icerir:
 - Apache ECharts ile zaman serisi grafigi
 - TanStack Query ile collector API polling
 - Zod ile runtime API dogrulama
-- Tauri 2 masaustu kabugu
+- Tauri 2 masaustu kabugu, ileride opsiyonel paketleme icin
 - Rust/Tokio/Axum collector API
 - SQLx + SQLite migration, WAL ve STRICT tablolar
 
 ## Hedef
 
-Bu proje ilk asamada tek makineye baglanan yerel bir operator uygulamasi olarak
-tasarlanir. Ana hedefler:
+Bu proje ilk asamada tek makineye baglanan yerel bir web operator uygulamasi
+olarak tasarlanir. Ana hedefler:
 
 - Makineden gelen sensor ve proses verilerini guvenilir sekilde kaydetmek.
 - Canli ve gecmis proses grafiklerini operator ekraninda gostermek.
@@ -59,6 +59,7 @@ tasarlanir. Ana hedefler:
 - PostgreSQL, yalnizca merkezi veya cok kullanicili sisteme gecilirse
 
 Detayli teknik tanim icin bkz. [docs/tech-stack.md](docs/tech-stack.md).
+Uygulama plani icin bkz. [docs/implementation-plan.md](docs/implementation-plan.md).
 
 ## Kurulum
 
@@ -119,14 +120,14 @@ npm run tauri:dev
 
 ```text
 .
-├── collector/              # Rust + Tokio + Axum collector
-├── migrations/             # SQLx SQLite migration dosyalari
-├── src/                    # React operator arayuzu
-├── src-tauri/              # Tauri 2 masaustu kabugu
-├── docs/                   # Mimari ve stack dokumantasyonu
-├── Cargo.toml              # Rust workspace
-├── package.json            # Frontend/Tauri npm komutlari
-└── vite.config.ts          # Vite ayarlari
+|-- collector/              # Rust + Tokio + Axum collector
+|-- migrations/             # SQLx SQLite migration dosyalari
+|-- src/                    # React operator arayuzu
+|-- src-tauri/              # Tauri 2 masaustu kabugu
+|-- docs/                   # Mimari ve stack dokumantasyonu
+|-- Cargo.toml              # Rust workspace
+|-- package.json            # Frontend/Tauri npm komutlari
+`-- vite.config.ts          # Vite ayarlari
 ```
 
 ## Veri Saklama

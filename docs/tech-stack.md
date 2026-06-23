@@ -5,16 +5,17 @@ katmanin sorumlulugunu tanimlar.
 
 ## Uygulama Modeli
 
-Proje, yerel masaustu uygulamasi ve arka planda calisan veri toplama katmani
-seklinde tasarlanir.
+Proje, web-oncelikli yerel operator arayuzu ve arka planda calisan veri toplama
+katmani seklinde tasarlanir.
 
-- Masaustu uygulamasi operator arayuzunu, grafik ekranlarini ve kayit
-  yonetimini sunar.
+- Web arayuzu operator ekranlarini, grafikleri ve kayit yonetimini sunar.
 - Collector katmani makineyle haberlesir, gelen veriyi dogrular ve depolamaya
   yazar.
 - SQLite yerel ve guvenilir ana veri kaynagi olur.
 - Ileride analitik ihtiyaclar buyurse Parquet/DuckDB okunabilir analiz katmani
   olarak eklenir.
+- Ileride tek tikla acilan masaustu paket gerekirse ayni web arayuzu Tauri
+  kabuguna alinabilir.
 
 ## Frontend
 
@@ -76,9 +77,9 @@ Kullanim alanlari:
 
 ### Tauri 2
 
-Uygulama masaustu paketi olarak Tauri 2 ile dagitilir. Web UI React tarafinda
-kalirken yerel dosya sistemi, proses yonetimi ve platform entegrasyonlari
-Tauri uzerinden yapilir.
+Tauri 2 ilk MVP'nin ana kosulu degildir. Web arayuzu once lokal browser
+uygulamasi olarak gelistirilir. Ileride tek tikla acilan masaustu paket
+gerektiginde ayni React arayuzu Tauri ile paketlenebilir.
 
 Tauri'nin bu proje icin gorevleri:
 
