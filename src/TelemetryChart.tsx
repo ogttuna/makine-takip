@@ -107,6 +107,16 @@ export function TelemetryChart({
       },
       tooltip: {
         trigger: "axis",
+        transitionDuration: 0,
+        axisPointer: {
+          animation: false,
+          type: "line",
+          lineStyle: {
+            color: "#94a3b8",
+            type: "dashed",
+            width: 1,
+          },
+        },
         valueFormatter: (value) =>
           typeof value === "number" ? value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "") : String(value),
       },
@@ -219,7 +229,7 @@ function buildSeries(
           color: config.color,
         },
         emphasis: {
-          focus: "series",
+          disabled: true,
         },
         data: shelfAverageLineData(samples, eventByFrameChannel),
       });
@@ -285,7 +295,7 @@ function buildSeries(
         color: config.color,
       },
       emphasis: {
-        focus: "series",
+        disabled: true,
       },
       data: lineData,
     });
@@ -302,7 +312,7 @@ function buildSeries(
           color: "#b91c1c",
         },
         emphasis: {
-          focus: "series",
+          disabled: true,
         },
         tooltip: {
           valueFormatter: (_value) => "suspect",
