@@ -13,10 +13,13 @@ import type { ImportReport, QualityEvent, RunSummary, SampleFrame } from "./api"
 import { getChannelConfig, sortChannels } from "./channelConfig";
 import { TelemetryChart } from "./TelemetryChart";
 
+type QualityFilter = "all" | "time_gap" | "suspect_value";
+
 export function App() {
   const queryClient = useQueryClient();
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
   const [visibleChannels, setVisibleChannels] = useState<string[]>([]);
+  const [qualityFilter, setQualityFilter] = useState<QualityFilter>("all");
   const [lastImportReport, setLastImportReport] = useState<ImportReport | null>(null);
   const runsQuery = useQuery({
     queryKey: ["runs"],
@@ -55,6 +58,8 @@ export function App() {
   const activeVisibleChannels = visibleChannels.filter((channel) =>
     channelCodes.includes(channel),
   );
+  const isRefreshing =
+    runsQuery.isFetching || samplesQuery.isFetching || qualityEventsQuery.isFetching;
 
   useEffect(() => {
     const runs = runsQuery.data ?? [];
@@ -86,29 +91,84 @@ export function App() {
     });
   }, [channelCodes]);
 
-  const sourceLabel = runsQuery.isError ? "Collector offline" : "Collector online";
+  useEffect(() => {
+    setQualityFilter("all");
+  }, [selectedRunId]);
+
+  const sourceLabel = runsQuery.isError
+    ? "Collector offline"
+    : isRefreshing
+      ? "Syncing"
+      : "Collector online";
+  const refreshData = async () => {
+    await queryClient.invalidateQueries({ queryKey: ["runs"] });
+
+    if (selectedRunId !== null) {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["run-samples", selectedRunId] }),
+        queryClient.invalidateQueries({
+          queryKey: ["run-quality-events", selectedRunId],
+        }),
+      ]);
+    }
+  };
 
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div>
+        <div className="topbar-title">
           <p className="eyebrow">FreezeDryMachine</p>
-          <h1>CSV Import ve Grafik</h1>
+          <h1>Run Review</h1>
+          <p>Local CSV workspace for freeze dry telemetry.</p>
         </div>
         <div className="connection-strip">
-          <span className={runsQuery.isError ? "status-dot" : "status-dot online"} />
-          <div>
-            <strong>{sourceLabel}</strong>
-            <span>{getCollectorUrl()}</span>
+          <div className="connection-state">
+            <span className={runsQuery.isError ? "status-dot" : "status-dot online"} />
+            <div>
+              <strong>{sourceLabel}</strong>
+              <span>{getCollectorUrl()}</span>
+            </div>
           </div>
+          <button
+            className="ghost-button"
+            disabled={isRefreshing}
+            onClick={refreshData}
+            type="button"
+          >
+            Refresh
+          </button>
         </div>
       </header>
 
       <section className="summary-grid">
-        <Metric label="Runs" value={String(runsQuery.data?.length ?? 0)} />
-        <Metric label="Samples" value={String(selectedRun?.row_count ?? samples.length)} />
-        <Metric label="Channels" value={String(channelCodes.length)} />
-        <Metric label="Warnings" value={String(selectedRun?.warning_count ?? qualityEvents.length)} />
+        <Metric
+          hint="stored"
+          label="Runs"
+          value={runsQuery.isLoading ? "..." : String(runsQuery.data?.length ?? 0)}
+        />
+        <Metric
+          hint="selected"
+          label="Samples"
+          value={
+            samplesQuery.isLoading
+              ? "..."
+              : String(selectedRun?.row_count ?? samples.length)
+          }
+        />
+        <Metric
+          hint={`${activeVisibleChannels.length} visible`}
+          label="Channels"
+          value={String(channelCodes.length)}
+        />
+        <Metric
+          hint={selectedRun ? "selected run" : "none selected"}
+          label="Warnings"
+          value={
+            qualityEventsQuery.isLoading
+              ? "..."
+              : String(selectedRun?.warning_count ?? qualityEvents.length)
+          }
+        />
       </section>
 
       <section className="workspace">
@@ -121,23 +181,47 @@ export function App() {
             <RunActions run={selectedRun} />
           </div>
 
+          <RunOverview
+            run={selectedRun}
+            samples={samples}
+            warningCount={selectedRun?.warning_count ?? qualityEvents.length}
+          />
+
           <ChannelControls
             channels={channelCodes}
             visibleChannels={activeVisibleChannels}
             onChange={setVisibleChannels}
           />
 
-          {samples.length > 0 ? (
+          {samplesQuery.isLoading ? (
+            <ChartState
+              message="Loading stored samples from the collector."
+              title="Loading run"
+            />
+          ) : samplesQuery.isError ? (
+            <ChartState
+              actionLabel="Retry"
+              message={samplesQuery.error.message}
+              onAction={() => samplesQuery.refetch()}
+              tone="error"
+              title="Samples could not be loaded"
+            />
+          ) : samples.length === 0 ? (
+            <ChartState
+              message="Import a CSV file or select a stored run."
+              title="No samples loaded"
+            />
+          ) : activeVisibleChannels.length === 0 ? (
+            <ChartState
+              message="Choose at least one channel to draw the chart."
+              title="No channels selected"
+            />
+          ) : (
             <TelemetryChart
               qualityEvents={qualityEvents}
               samples={samples}
               visibleChannels={activeVisibleChannels}
             />
-          ) : (
-            <div className="empty-chart">
-              <strong>No samples loaded</strong>
-              <span>Import a CSV file or select a stored run.</span>
-            </div>
           )}
         </div>
 
@@ -156,12 +240,22 @@ export function App() {
             </div>
           </div>
           <RunList
+            error={runsQuery.error}
+            isLoading={runsQuery.isLoading}
             onSelect={setSelectedRunId}
+            onRetry={() => runsQuery.refetch()}
             runs={runsQuery.data ?? []}
             selectedRunId={selectedRunId}
           />
 
-          <QualitySummary events={qualityEvents} />
+          <QualitySummary
+            error={qualityEventsQuery.error}
+            events={qualityEvents}
+            filter={qualityFilter}
+            isLoading={qualityEventsQuery.isLoading}
+            onFilterChange={setQualityFilter}
+            onRetry={() => qualityEventsQuery.refetch()}
+          />
         </aside>
       </section>
     </main>
@@ -179,30 +273,52 @@ function ImportPanel({
   lastReport: ImportReport | null;
   onUpload: (file: File) => void;
 }) {
+  const [isDragActive, setIsDragActive] = useState(false);
+  const handleFile = (file: File | undefined) => {
+    if (file && !isPending) {
+      onUpload(file);
+    }
+  };
+
   return (
     <section className="import-panel">
       <div className="section-heading compact">
         <div>
           <h2>CSV Import</h2>
-          <p>Upload the machine log file from this computer.</p>
+          <p>Machine log from this computer.</p>
         </div>
       </div>
-      <label className="file-drop">
+      <label
+        className={isDragActive ? "file-drop active" : "file-drop"}
+        onDragEnter={(event) => {
+          event.preventDefault();
+          setIsDragActive(true);
+        }}
+        onDragLeave={(event) => {
+          event.preventDefault();
+          setIsDragActive(false);
+        }}
+        onDragOver={(event) => {
+          event.preventDefault();
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          setIsDragActive(false);
+          handleFile(event.dataTransfer.files[0]);
+        }}
+      >
         <input
           accept=".csv,text/csv"
           disabled={isPending}
           onChange={(event) => {
             const file = event.currentTarget.files?.[0];
             event.currentTarget.value = "";
-
-            if (file) {
-              onUpload(file);
-            }
+            handleFile(file);
           }}
           type="file"
         />
-        <strong>{isPending ? "Importing..." : "Choose CSV"}</strong>
-        <span>Expected delimiter is semicolon.</span>
+        <strong>{isPending ? "Importing..." : "Drop or choose CSV"}</strong>
+        <span>Semicolon-delimited machine log.</span>
       </label>
       {lastReport ? <ImportReportView report={lastReport} /> : null}
       {error ? <p className="error-text">{error.message}</p> : null}
@@ -214,6 +330,7 @@ function ImportReportView({ report }: { report: ImportReport }) {
   return (
     <div className="import-report">
       <strong>{report.duplicate ? "Already imported" : "Import complete"}</strong>
+      <span>{report.file_name}</span>
       <dl>
         <div>
           <dt>Rows</dt>
@@ -228,6 +345,47 @@ function ImportReportView({ report }: { report: ImportReport }) {
           <dd>{report.warning_count}</dd>
         </div>
       </dl>
+    </div>
+  );
+}
+
+function RunOverview({
+  run,
+  samples,
+  warningCount,
+}: {
+  run: RunSummary | null;
+  samples: SampleFrame[];
+  warningCount: number;
+}) {
+  const firstSample = samples[0];
+  const lastSample = samples[samples.length - 1];
+
+  return (
+    <div className="run-overview">
+      <OverviewItem label="Duration" value={durationLabel(run)} />
+      <OverviewItem
+        label="First sample"
+        value={
+          firstSample ? formatDate(firstSample.sampled_at) : shortDate(run?.started_at)
+        }
+      />
+      <OverviewItem
+        label="Last sample"
+        value={
+          lastSample ? formatDate(lastSample.sampled_at) : shortDate(run?.finished_at)
+        }
+      />
+      <OverviewItem label="Warnings" value={String(warningCount)} />
+    </div>
+  );
+}
+
+function OverviewItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <span>{label}</span>
+      <strong>{value}</strong>
     </div>
   );
 }
@@ -255,6 +413,12 @@ function ChannelControls({
 
   return (
     <div className="channel-control-shell">
+      <div className="control-heading">
+        <strong>Channels</strong>
+        <span>
+          {visibleChannels.length} of {channels.length} visible
+        </span>
+      </div>
       <div className="channel-quick-actions">
         <button onClick={() => onChange(channels)} type="button">
           All
@@ -299,9 +463,11 @@ function ChannelControls({
 }
 
 function Metric({
+  hint,
   label,
   value,
 }: {
+  hint?: string;
   label: string;
   value: string;
 }) {
@@ -309,6 +475,7 @@ function Metric({
     <div className="metric">
       <span>{label}</span>
       <strong>{value}</strong>
+      {hint ? <small>{hint}</small> : null}
     </div>
   );
 }
@@ -330,14 +497,35 @@ function RunActions({ run }: { run: RunSummary | null }) {
 }
 
 function RunList({
+  error,
+  isLoading,
   onSelect,
+  onRetry,
   runs,
   selectedRunId,
 }: {
+  error: Error | null;
+  isLoading: boolean;
   onSelect: (runId: number) => void;
+  onRetry: () => void;
   runs: RunSummary[];
   selectedRunId: number | null;
 }) {
+  if (isLoading) {
+    return <p className="empty-state">Loading stored runs...</p>;
+  }
+
+  if (error) {
+    return (
+      <InlineError
+        actionLabel="Retry"
+        message={error.message}
+        onAction={onRetry}
+        title="Runs could not be loaded"
+      />
+    );
+  }
+
   if (runs.length === 0) {
     return <p className="empty-state">No runs stored yet.</p>;
   }
@@ -364,18 +552,68 @@ function RunList({
   );
 }
 
-function QualitySummary({ events }: { events: QualityEvent[] }) {
+function QualitySummary({
+  error,
+  events,
+  filter,
+  isLoading,
+  onFilterChange,
+  onRetry,
+}: {
+  error: Error | null;
+  events: QualityEvent[];
+  filter: QualityFilter;
+  isLoading: boolean;
+  onFilterChange: (filter: QualityFilter) => void;
+  onRetry: () => void;
+}) {
   const counts = events.reduce<Record<string, number>>((acc, event) => {
     acc[event.event_type] = (acc[event.event_type] ?? 0) + 1;
     return acc;
   }, {});
-  const visibleEvents = events.slice(0, 16);
+  const filteredEvents =
+    filter === "all" ? events : events.filter((event) => event.event_type === filter);
+  const visibleEvents = filteredEvents.slice(0, 16);
 
   return (
     <div className="quality-summary">
-      <strong>Quality</strong>
-      {events.length === 0 ? (
+      <div className="quality-header">
+        <strong>Quality</strong>
+        <span>{events.length} warnings</span>
+      </div>
+      <div className="quality-filters">
+        <FilterButton
+          active={filter === "all"}
+          count={events.length}
+          label="All"
+          onClick={() => onFilterChange("all")}
+        />
+        <FilterButton
+          active={filter === "time_gap"}
+          count={counts.time_gap ?? 0}
+          label="Gaps"
+          onClick={() => onFilterChange("time_gap")}
+        />
+        <FilterButton
+          active={filter === "suspect_value"}
+          count={counts.suspect_value ?? 0}
+          label="Suspect"
+          onClick={() => onFilterChange("suspect_value")}
+        />
+      </div>
+      {isLoading ? (
+        <span>Loading warnings...</span>
+      ) : error ? (
+        <InlineError
+          actionLabel="Retry"
+          message={error.message}
+          onAction={onRetry}
+          title="Warnings could not be loaded"
+        />
+      ) : events.length === 0 ? (
         <span>No warnings for selected run.</span>
+      ) : filteredEvents.length === 0 ? (
+        <span>No warnings in this filter.</span>
       ) : (
         <dl>
           {Object.entries(counts).map(([eventType, count]) => (
@@ -396,14 +634,85 @@ function QualitySummary({ events }: { events: QualityEvent[] }) {
                   {event.channel_code ?? "run"} - {qualityEventTimeLabel(event)}
                 </span>
               </div>
-              <p>{event.message}</p>
+              <p>{cleanQualityMessage(event.message)}</p>
             </li>
           ))}
         </ul>
       ) : null}
-      {events.length > visibleEvents.length ? (
-        <span>{events.length - visibleEvents.length} more warnings hidden.</span>
+      {filteredEvents.length > visibleEvents.length ? (
+        <span>{filteredEvents.length - visibleEvents.length} more warnings hidden.</span>
       ) : null}
+    </div>
+  );
+}
+
+function FilterButton({
+  active,
+  count,
+  label,
+  onClick,
+}: {
+  active: boolean;
+  count: number;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className={active ? "filter-button active" : "filter-button"}
+      onClick={onClick}
+      type="button"
+    >
+      <span>{label}</span>
+      <strong>{count}</strong>
+    </button>
+  );
+}
+
+function ChartState({
+  actionLabel,
+  message,
+  onAction,
+  title,
+  tone = "idle",
+}: {
+  actionLabel?: string;
+  message: string;
+  onAction?: () => void;
+  title: string;
+  tone?: "idle" | "error";
+}) {
+  return (
+    <div className={tone === "error" ? "chart-state error" : "chart-state"}>
+      <strong>{title}</strong>
+      <span>{message}</span>
+      {actionLabel && onAction ? (
+        <button onClick={onAction} type="button">
+          {actionLabel}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function InlineError({
+  actionLabel,
+  message,
+  onAction,
+  title,
+}: {
+  actionLabel: string;
+  message: string;
+  onAction: () => void;
+  title: string;
+}) {
+  return (
+    <div className="inline-error">
+      <strong>{title}</strong>
+      <span>{message}</span>
+      <button onClick={onAction} type="button">
+        {actionLabel}
+      </button>
     </div>
   );
 }
@@ -428,6 +737,37 @@ function runRangeLabel(run: RunSummary | null): string {
   return `${formatDate(run.started_at)} - ${formatDate(run.finished_at)}`;
 }
 
+function durationLabel(run: RunSummary | null): string {
+  if (!run?.started_at || !run.finished_at) {
+    return "-";
+  }
+
+  const start = Date.parse(run.started_at);
+  const end = Date.parse(run.finished_at);
+
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
+    return "-";
+  }
+
+  const totalMinutes = Math.round((end - start) / 60_000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+
+  if (hours === 0) {
+    return `${minutes}m`;
+  }
+
+  return `${hours}h ${minutes}m`;
+}
+
+function shortDate(value: string | null | undefined): string {
+  if (!value) {
+    return "-";
+  }
+
+  return formatDate(value);
+}
+
 function qualityEventLabel(eventType: string): string {
   if (eventType === "time_gap") {
     return "Time gap";
@@ -447,6 +787,10 @@ function qualityEventTimeLabel(event: QualityEvent): string {
     event.source_timestamp_text ?? (event.sampled_at ? formatDate(event.sampled_at) : null);
 
   return [timeLabel, rowLabel].filter(Boolean).join(" - ") || "no timestamp";
+}
+
+function cleanQualityMessage(message: string): string {
+  return message.replaceAll("`", "");
 }
 
 function formatDate(value: string): string {
