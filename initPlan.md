@@ -83,9 +83,9 @@ Ilk kullanisli surum su akisi tamamlamali:
 
 ## Veri Modeli
 
-Ilk taslaktaki tamamen normalize `sample_frames` + `measurements` modeli su an
-gereksiz karmasik. Mevcut makine CSV kolonlari belli oldugu icin baslangicta
-genis `samples` tablosu kullanilacak.
+Veri tipi ve kanal seti ileride degisebilecegi icin baslangicta hafif esnek
+model kullanilacak. CSV'deki zaman satiri `sample_frames`, kanal degerleri
+`measurements` tablosunda tutulur.
 
 ### `runs`
 
@@ -118,9 +118,23 @@ error_count
 imported_at
 ```
 
-### `samples`
+### `channels`
 
-CSV satirinin genis tablo hali.
+Olcum kanal tanimlari.
+
+```text
+id
+code
+display_name
+unit
+group_name
+value_type
+created_at
+```
+
+### `sample_frames`
+
+CSV satirinin zaman ve kaynak bilgisi.
 
 ```text
 id
@@ -128,17 +142,25 @@ run_id
 sampled_at
 source_timestamp_text
 source_row_number
-raf1
-raf2
-raf3
-raf4
-l_pres
-h_pres
-vacum
-serp2
-serp4
-kondanser
-quality_flags_json
+created_at
+```
+
+### `measurements`
+
+Frame icindeki kanal degerleri. Ham veri her zaman korunur; sayisal deger
+parse edilebilirse `numeric_value` dolar, ileride metin/bool gibi tipler
+gerekirse `value_text` ve `value_type` kullanilir.
+
+```text
+id
+frame_id
+channel_id
+raw_text
+numeric_value
+value_text
+value_type
+quality
+quality_reason
 created_at
 ```
 
@@ -149,11 +171,12 @@ Zaman boslugu, supheli deger ve parse uyarilari.
 ```text
 id
 run_id
-sample_id
-channel_code
+frame_id
+channel_id
 event_type
 severity
 message
+metadata_json
 created_at
 ```
 
@@ -213,7 +236,7 @@ Kontroller:
 
 ## Implementasyon Sirasi
 
-1. SQLite migration'i gercek CSV semasina uydur.
+1. SQLite migration'i esnek CSV olcum semasina uydur.
 2. CSV parser modulu yaz.
 3. Ornek CSV icin parser testleri ekle.
 4. Import API endpoint'ini yaz.

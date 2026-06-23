@@ -114,7 +114,6 @@ npm run tauri:dev
 - `VITE_COLLECTOR_URL`: Frontend'in kullanacagi collector API adresi
 - `FREEZEDRY_BIND_ADDR`: Collector bind adresi
 - `FREEZEDRY_DB_URL`: SQLite dosya adresi
-- `FREEZEDRY_SEED_DEMO`: Bos veritabanina demo kosusu ekler
 
 ## Proje Yapisi
 
@@ -135,8 +134,10 @@ npm run tauri:dev
 Varsayilan SQLite dosyasi `data/freezedry.db` olarak olusur. Bu klasor ve
 veritabani dosyalari Git'e alinmaz. Migration ilk calismada su tablolari kurar:
 
-- `recipes`
 - `runs`
-- `samples`
-- `events`
+- `import_files`
+- `channels`
+- `sample_frames`
+- `measurements`
+- `quality_events`
 - `settings`

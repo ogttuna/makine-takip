@@ -53,3 +53,4 @@ exports/
 
 # Local machine logs
 LogFile_*.csv
+!fixtures/LogFile_*.csv

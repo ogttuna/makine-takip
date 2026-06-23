@@ -6,7 +6,6 @@ use anyhow::Context;
 pub struct CollectorConfig {
     pub bind_addr: SocketAddr,
     pub database_url: String,
-    pub seed_demo_data: bool,
 }
 
 impl CollectorConfig {
@@ -17,14 +16,10 @@ impl CollectorConfig {
             .context("FREEZEDRY_BIND_ADDR must be a socket address")?;
         let database_url = std::env::var("FREEZEDRY_DB_URL")
             .unwrap_or_else(|_| "sqlite://data/freezedry.db".to_string());
-        let seed_demo_data = std::env::var("FREEZEDRY_SEED_DEMO")
-            .map(|value| value != "0" && value.to_lowercase() != "false")
-            .unwrap_or(true);
 
         Ok(Self {
             bind_addr,
             database_url,
-            seed_demo_data,
         })
     }
 }

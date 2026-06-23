@@ -1,0 +1,582 @@
+use std::collections::HashMap;
+
+use anyhow::{Context, anyhow, bail};
+use chrono::NaiveDateTime;
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+use sqlx::{Row, SqlitePool};
+
+const TIMESTAMP_COLUMN: &str = "TARIH SAAT";
+const TIMESTAMP_FORMAT: &str = "%Y-%m-%d-%H:%M:%S%.f";
+const DISPLAY_TIMESTAMP_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.3f";
+const TIME_GAP_WARNING_SECONDS: f64 = 240.0;
+const PARSER_VERSION: &str = "csv-import-v1";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ImportReport {
+    pub import_id: i64,
+    pub run_id: i64,
+    pub duplicate: bool,
+    pub file_name: String,
+    pub file_sha256: String,
+    pub row_count: usize,
+    pub channel_count: usize,
+    pub warning_count: usize,
+    pub error_count: usize,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedCsv {
+    pub file_name: String,
+    pub file_sha256: String,
+    pub channel_codes: Vec<String>,
+    pub frames: Vec<ParsedFrame>,
+    pub quality_events: Vec<ParsedQualityEvent>,
+    pub warning_count: usize,
+    pub error_count: usize,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedFrame {
+    pub sampled_at: String,
+    pub source_timestamp_text: String,
+    pub source_row_number: i64,
+    pub measurements: Vec<ParsedMeasurement>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedMeasurement {
+    pub channel_code: String,
+    pub raw_text: String,
+    pub numeric_value: Option<f64>,
+    pub value_text: Option<String>,
+    pub value_type: ValueType,
+    pub quality: MeasurementQuality,
+    pub quality_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueType {
+    Number,
+    Text,
+}
+
+impl ValueType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Number => "number",
+            Self::Text => "text",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeasurementQuality {
+    Good,
+    Suspect,
+    Invalid,
+}
+
+impl MeasurementQuality {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Good => "good",
+            Self::Suspect => "suspect",
+            Self::Invalid => "invalid",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedQualityEvent {
+    pub source_row_number: i64,
+    pub channel_code: Option<String>,
+    pub event_type: String,
+    pub severity: String,
+    pub message: String,
+    pub metadata_json: Option<String>,
+}
+
+pub fn parse_csv_bytes(file_name: impl Into<String>, bytes: &[u8]) -> anyhow::Result<ParsedCsv> {
+    let file_name = file_name.into();
+    let file_sha256 = sha256_hex(bytes);
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(b';')
+        .trim(csv::Trim::All)
+        .flexible(false)
+        .from_reader(bytes);
+
+    let headers = reader
+        .headers()
+        .context("failed to read CSV headers")?
+        .iter()
+        .map(|header| header.trim().to_string())
+        .collect::<Vec<_>>();
+    let positions = headers
+        .iter()
+        .enumerate()
+        .map(|(index, header)| (header.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let Some(timestamp_index) = positions.get(TIMESTAMP_COLUMN).copied() else {
+        bail!("CSV missing required timestamp column `{TIMESTAMP_COLUMN}`");
+    };
+    let channel_codes = headers
+        .iter()
+        .filter(|header| header.as_str() != TIMESTAMP_COLUMN)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if channel_codes.is_empty() {
+        bail!("CSV does not contain any measurement channels");
+    }
+
+    let mut frames = Vec::new();
+    let mut quality_events = Vec::new();
+    let mut warning_count = 0_usize;
+    let mut error_count = 0_usize;
+    let mut previous_sampled_at: Option<NaiveDateTime> = None;
+
+    for (record_index, record) in reader.records().enumerate() {
+        let source_row_number = (record_index + 2) as i64;
+        let record =
+            record.with_context(|| format!("failed to read CSV row {source_row_number}"))?;
+        let timestamp_text = record
+            .get(timestamp_index)
+            .map(str::trim)
+            .ok_or_else(|| anyhow!("row {source_row_number} missing timestamp"))?;
+        let sampled_at = NaiveDateTime::parse_from_str(timestamp_text, TIMESTAMP_FORMAT)
+            .with_context(|| {
+                format!("row {source_row_number} has invalid timestamp `{timestamp_text}`")
+            })?;
+
+        if let Some(previous) = previous_sampled_at {
+            let gap_seconds = (sampled_at - previous).num_milliseconds() as f64 / 1_000.0;
+
+            if gap_seconds > TIME_GAP_WARNING_SECONDS {
+                warning_count += 1;
+                quality_events.push(ParsedQualityEvent {
+                    source_row_number,
+                    channel_code: None,
+                    event_type: "time_gap".to_string(),
+                    severity: "warning".to_string(),
+                    message: format!("time gap of {gap_seconds:.3} seconds before this sample"),
+                    metadata_json: Some(
+                        serde_json::json!({
+                            "gap_seconds": gap_seconds,
+                            "previous_timestamp": previous.format(DISPLAY_TIMESTAMP_FORMAT).to_string(),
+                            "current_timestamp": sampled_at.format(DISPLAY_TIMESTAMP_FORMAT).to_string()
+                        })
+                        .to_string(),
+                    ),
+                });
+            }
+        }
+
+        previous_sampled_at = Some(sampled_at);
+
+        let mut measurements = Vec::with_capacity(channel_codes.len());
+
+        for channel_code in &channel_codes {
+            let Some(column_index) = positions.get(channel_code.as_str()).copied() else {
+                continue;
+            };
+            let raw_text = record
+                .get(column_index)
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_string();
+            let parsed_value = raw_text.parse::<f64>();
+            let (numeric_value, value_text, value_type, quality, quality_reason) =
+                match parsed_value {
+                    Ok(value) => {
+                        if channel_code == "RAF3" && (value - 850.0).abs() < 0.000_001 {
+                            warning_count += 1;
+                            quality_events.push(ParsedQualityEvent {
+                                source_row_number,
+                                channel_code: Some(channel_code.clone()),
+                                event_type: "suspect_value".to_string(),
+                                severity: "warning".to_string(),
+                                message: "`RAF3` reported sentinel-like value 850.0".to_string(),
+                                metadata_json: Some(
+                                    serde_json::json!({
+                                        "channel_code": channel_code,
+                                        "raw_value": value,
+                                        "rule": "raf3_850_suspect"
+                                    })
+                                    .to_string(),
+                                ),
+                            });
+
+                            (
+                                Some(value),
+                                None,
+                                ValueType::Number,
+                                MeasurementQuality::Suspect,
+                                Some("raf3_850_suspect".to_string()),
+                            )
+                        } else {
+                            (
+                                Some(value),
+                                None,
+                                ValueType::Number,
+                                MeasurementQuality::Good,
+                                None,
+                            )
+                        }
+                    }
+                    Err(_) => {
+                        error_count += 1;
+                        quality_events.push(ParsedQualityEvent {
+                            source_row_number,
+                            channel_code: Some(channel_code.clone()),
+                            event_type: "parse_error".to_string(),
+                            severity: "error".to_string(),
+                            message: format!(
+                                "channel `{channel_code}` value `{raw_text}` could not be parsed as number"
+                            ),
+                            metadata_json: Some(
+                                serde_json::json!({
+                                    "channel_code": channel_code,
+                                    "raw_text": raw_text,
+                                })
+                                .to_string(),
+                            ),
+                        });
+
+                        (
+                            None,
+                            Some(raw_text.clone()),
+                            ValueType::Text,
+                            MeasurementQuality::Invalid,
+                            Some("numeric_parse_error".to_string()),
+                        )
+                    }
+                };
+
+            measurements.push(ParsedMeasurement {
+                channel_code: channel_code.clone(),
+                raw_text,
+                numeric_value,
+                value_text,
+                value_type,
+                quality,
+                quality_reason,
+            });
+        }
+
+        frames.push(ParsedFrame {
+            sampled_at: sampled_at.format(DISPLAY_TIMESTAMP_FORMAT).to_string(),
+            source_timestamp_text: timestamp_text.to_string(),
+            source_row_number,
+            measurements,
+        });
+    }
+
+    if frames.is_empty() {
+        bail!("CSV does not contain any data rows");
+    }
+
+    let started_at = frames.first().map(|frame| frame.sampled_at.clone());
+    let finished_at = frames.last().map(|frame| frame.sampled_at.clone());
+
+    Ok(ParsedCsv {
+        file_name,
+        file_sha256,
+        channel_codes,
+        frames,
+        quality_events,
+        warning_count,
+        error_count,
+        started_at,
+        finished_at,
+    })
+}
+
+pub async fn import_csv_bytes(
+    pool: &SqlitePool,
+    file_name: impl Into<String>,
+    bytes: &[u8],
+) -> anyhow::Result<ImportReport> {
+    let parsed = parse_csv_bytes(file_name, bytes)?;
+
+    if let Some(report) = duplicate_report(pool, &parsed.file_sha256).await? {
+        return Ok(report);
+    }
+
+    let mut tx = pool.begin().await?;
+    let run_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO runs (name, source_kind, source_name, started_at, finished_at, status)
+        VALUES (?1, 'csv_import', ?2, ?3, ?4, 'imported')
+        RETURNING id
+        "#,
+    )
+    .bind(&parsed.file_name)
+    .bind(&parsed.file_name)
+    .bind(&parsed.started_at)
+    .bind(&parsed.finished_at)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let mut channel_ids = HashMap::new();
+
+    for channel_code in &parsed.channel_codes {
+        sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO channels (code, display_name, group_name, value_type)
+            VALUES (?1, ?2, ?3, 'number')
+            "#,
+        )
+        .bind(channel_code)
+        .bind(channel_code)
+        .bind(default_group(channel_code))
+        .execute(&mut *tx)
+        .await?;
+
+        let channel_id: i64 = sqlx::query_scalar("SELECT id FROM channels WHERE code = ?1")
+            .bind(channel_code)
+            .fetch_one(&mut *tx)
+            .await?;
+        channel_ids.insert(channel_code.clone(), channel_id);
+    }
+
+    let mut frame_ids = HashMap::new();
+
+    for frame in &parsed.frames {
+        let frame_id: i64 = sqlx::query_scalar(
+            r#"
+            INSERT INTO sample_frames (
+                run_id,
+                sampled_at,
+                source_timestamp_text,
+                source_row_number
+            )
+            VALUES (?1, ?2, ?3, ?4)
+            RETURNING id
+            "#,
+        )
+        .bind(run_id)
+        .bind(&frame.sampled_at)
+        .bind(&frame.source_timestamp_text)
+        .bind(frame.source_row_number)
+        .fetch_one(&mut *tx)
+        .await?;
+        frame_ids.insert(frame.source_row_number, frame_id);
+
+        for measurement in &frame.measurements {
+            let channel_id = channel_ids
+                .get(&measurement.channel_code)
+                .copied()
+                .ok_or_else(|| anyhow!("missing channel id for {}", measurement.channel_code))?;
+
+            sqlx::query(
+                r#"
+                INSERT INTO measurements (
+                    frame_id,
+                    channel_id,
+                    raw_text,
+                    numeric_value,
+                    value_text,
+                    value_type,
+                    quality,
+                    quality_reason
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                "#,
+            )
+            .bind(frame_id)
+            .bind(channel_id)
+            .bind(&measurement.raw_text)
+            .bind(measurement.numeric_value)
+            .bind(&measurement.value_text)
+            .bind(measurement.value_type.as_str())
+            .bind(measurement.quality.as_str())
+            .bind(&measurement.quality_reason)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    for event in &parsed.quality_events {
+        let frame_id = frame_ids.get(&event.source_row_number).copied();
+        let channel_id = event
+            .channel_code
+            .as_ref()
+            .and_then(|channel_code| channel_ids.get(channel_code).copied());
+
+        sqlx::query(
+            r#"
+            INSERT INTO quality_events (
+                run_id,
+                frame_id,
+                channel_id,
+                event_type,
+                severity,
+                message,
+                metadata_json
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+        )
+        .bind(run_id)
+        .bind(frame_id)
+        .bind(channel_id)
+        .bind(&event.event_type)
+        .bind(&event.severity)
+        .bind(&event.message)
+        .bind(&event.metadata_json)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    let import_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO import_files (
+            run_id,
+            file_name,
+            file_sha256,
+            row_count,
+            warning_count,
+            error_count,
+            parser_version
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        RETURNING id
+        "#,
+    )
+    .bind(run_id)
+    .bind(&parsed.file_name)
+    .bind(&parsed.file_sha256)
+    .bind(parsed.frames.len() as i64)
+    .bind(parsed.warning_count as i64)
+    .bind(parsed.error_count as i64)
+    .bind(PARSER_VERSION)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    Ok(ImportReport {
+        import_id,
+        run_id,
+        duplicate: false,
+        file_name: parsed.file_name,
+        file_sha256: parsed.file_sha256,
+        row_count: parsed.frames.len(),
+        channel_count: parsed.channel_codes.len(),
+        warning_count: parsed.warning_count,
+        error_count: parsed.error_count,
+        started_at: parsed.started_at,
+        finished_at: parsed.finished_at,
+    })
+}
+
+async fn duplicate_report(
+    pool: &SqlitePool,
+    file_sha256: &str,
+) -> anyhow::Result<Option<ImportReport>> {
+    let Some(row) = sqlx::query(
+        r#"
+        SELECT
+            i.id AS import_id,
+            i.run_id,
+            i.file_name,
+            i.file_sha256,
+            i.row_count,
+            i.warning_count,
+            i.error_count,
+            r.started_at,
+            r.finished_at,
+            COUNT(DISTINCT m.channel_id) AS channel_count
+        FROM import_files i
+        JOIN runs r ON r.id = i.run_id
+        LEFT JOIN sample_frames f ON f.run_id = r.id
+        LEFT JOIN measurements m ON m.frame_id = f.id
+        WHERE i.file_sha256 = ?1
+        GROUP BY i.id
+        "#,
+    )
+    .bind(file_sha256)
+    .fetch_optional(pool)
+    .await?
+    else {
+        return Ok(None);
+    };
+
+    Ok(Some(ImportReport {
+        import_id: row.try_get::<i64, _>("import_id")?,
+        run_id: row.try_get::<i64, _>("run_id")?,
+        duplicate: true,
+        file_name: row.try_get::<String, _>("file_name")?,
+        file_sha256: row.try_get::<String, _>("file_sha256")?,
+        row_count: row.try_get::<i64, _>("row_count")? as usize,
+        channel_count: row.try_get::<i64, _>("channel_count")? as usize,
+        warning_count: row.try_get::<i64, _>("warning_count")? as usize,
+        error_count: row.try_get::<i64, _>("error_count")? as usize,
+        started_at: row.try_get::<Option<String>, _>("started_at")?,
+        finished_at: row.try_get::<Option<String>, _>("finished_at")?,
+    }))
+}
+
+fn default_group(channel_code: &str) -> &'static str {
+    match channel_code {
+        "RAF1" | "RAF2" | "RAF3" | "RAF4" => "shelf",
+        "L_PRES" | "H_PRES" => "pressure",
+        "VACUM" => "vacuum",
+        "SERP2" | "SERP4" | "KONDANSER" => "cooling",
+        _ => "other",
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_csv_bytes;
+
+    const SAMPLE_CSV: &[u8] = include_bytes!("../../fixtures/LogFile_2026_01_26.csv");
+
+    #[test]
+    fn parses_freeze_dry_csv_shape_and_quality() {
+        let parsed = parse_csv_bytes("LogFile_2026_01_26.csv", SAMPLE_CSV).unwrap();
+
+        assert_eq!(parsed.frames.len(), 144);
+        assert_eq!(parsed.channel_codes.len(), 10);
+        assert_eq!(
+            parsed.started_at.as_deref(),
+            Some("2026-01-26T11:08:17.626")
+        );
+        assert_eq!(
+            parsed.finished_at.as_deref(),
+            Some("2026-01-26T18:51:16.967")
+        );
+        assert_eq!(
+            parsed
+                .quality_events
+                .iter()
+                .filter(|event| event.event_type == "time_gap")
+                .count(),
+            7
+        );
+        assert_eq!(
+            parsed
+                .quality_events
+                .iter()
+                .filter(|event| event.event_type == "suspect_value")
+                .count(),
+            4
+        );
+        assert_eq!(parsed.warning_count, 11);
+        assert_eq!(parsed.error_count, 0);
+    }
+}

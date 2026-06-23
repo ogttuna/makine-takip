@@ -123,9 +123,10 @@ MVP disinda kalacaklar:
 
 ## Veri Modeli Karari
 
-Taslak plandaki tamamen normalize `sample_frames` + `measurements` modeli
-esnek ama bu asama icin gereksiz karmasik. Mevcut makine CSV'sinde kolonlar
-biliniyor. MVP icin daha sade bir model yeterli.
+Ilk taslakta CSV kolonlarini dogrudan genis `samples` tablosuna almak
+dusunulmustu. Ancak veri tipi ve kanal seti ileride degisebilecegi icin MVP'de
+hafif esnek model kullanilacak: zaman satiri `sample_frames`, kanal degerleri
+`measurements` tablosunda tutulacak.
 
 Onerilen tablolar:
 
@@ -160,26 +161,49 @@ error_count
 imported_at
 ```
 
-### `samples`
+### `channels`
 
-Ilk surum icin genis tablo. CSV kolonlari dogrudan burada tutulur.
+Olcum kanallarinin kodu ve gosterim bilgisi.
+
+```text
+id
+code
+display_name
+unit
+group_name
+value_type
+created_at
+```
+
+### `sample_frames`
+
+CSV'deki tek zaman satiri.
 
 ```text
 id
 run_id
 sampled_at
+source_timestamp_text
 source_row_number
-raf1
-raf2
-raf3
-raf4
-l_pres
-h_pres
-vacum
-serp2
-serp4
-kondanser
-quality_flags_json
+created_at
+```
+
+### `measurements`
+
+Bir frame icindeki tek kanal degeri. Ham metin her zaman saklanir; sayisal
+parse basariliysa `numeric_value` dolar, ileride metin/bool gibi tipler
+gelirse `value_text` ve `value_type` kullanilir.
+
+```text
+id
+frame_id
+channel_id
+raw_text
+numeric_value
+value_text
+value_type
+quality
+quality_reason
 created_at
 ```
 
@@ -190,11 +214,12 @@ Zaman boslugu, supheli deger, parse uyarisi gibi olaylar.
 ```text
 id
 run_id
-sample_id
-channel_code
+frame_id
+channel_id
 event_type
 severity
 message
+metadata_json
 created_at
 ```
 
@@ -208,8 +233,9 @@ value_json
 updated_at
 ```
 
-Bu model sade ve sorgulanabilir. Ileride farkli makineler veya dinamik kanal
-setleri gerekirse normalize modele gecilebilir.
+Bu model genis tablo kadar basit degil, ama veri tipi ve kanal degisimlerine
+daha hazir. Yine de mikroservis veya time-series database seviyesinde
+overengineering sayilmaz.
 
 ## Veri Kalitesi Kurallari
 
@@ -343,9 +369,8 @@ Bu adim koddan once netlik saglar.
 - CSV secimi: browser dosya seciciden upload edilir; server yerel dosya path'i
   beklemez.
 - Tauri: simdilik paketleme opsiyonu, MVP akisini belirlemez.
-- Veri modeli: ilk surumda genis `samples` tablosu.
-- Demo seed: CSV import baslayinca kaldirilir veya sadece development flag'iyle
-  calisir.
+- Veri modeli: `sample_frames` + `measurements` ile hafif esnek model.
+- Demo seed kaldirilir; gercek veri akisi CSV import ile baslar.
 
 Kabul:
 
@@ -355,7 +380,8 @@ Kabul:
 
 ### 1. Veritabani Semasini CSV'ye Uydur
 
-Mevcut demo semasi yerine CSV kolonlarina uygun sema kullanilacak.
+Mevcut demo semasi yerine CSV'ye uygun ama kanal degisimlerine hazir sema
+kullanilacak.
 
 Dosyalar:
 
@@ -368,12 +394,12 @@ Yapilacaklar:
 - `runs` tablosuna `source_kind`, `source_name`, `started_at`, `finished_at`,
   `status`, `notes` alanlari ver.
 - `import_files` tablosunu ekle.
-- `samples` tablosunu CSV kolonlariyla genis tablo yap:
-  `raf1`, `raf2`, `raf3`, `raf4`, `l_pres`, `h_pres`, `vacum`, `serp2`,
-  `serp4`, `kondanser`.
+- `channels`, `sample_frames` ve `measurements` tablolarini ekle.
+- `measurements` icinde `raw_text`, `numeric_value`, `value_text`,
+  `value_type`, `quality`, `quality_reason` alanlarini tut.
 - `quality_events` tablosunu ekle.
 - `file_sha256` icin unique index koy.
-- Demo veri seed'ini kaldir veya sadece `FREEZEDRY_SEED_DEMO=true` ise calistir.
+- Demo veri seed'ini kaldir.
 
 Kabul:
 
@@ -648,7 +674,7 @@ Kabul:
 
 Uygulama sirasinda bu liste takip edilecek.
 
-1. Sema ve migration'i CSV modeline cevir.
+1. Sema ve migration'i esnek CSV olcum modeline cevir.
 2. CSV parser modulu yaz.
 3. Parser testlerini ornek CSV ile sabitle.
 4. Import API'sini yaz.

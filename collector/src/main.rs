@@ -1,15 +1,10 @@
-mod config;
-mod db;
-mod machine;
-mod routes;
-
 use anyhow::Context;
+use collector::config::CollectorConfig;
+use collector::{db, routes};
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
-
-use crate::config::CollectorConfig;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -17,10 +12,6 @@ async fn main() -> anyhow::Result<()> {
 
     let config = CollectorConfig::from_env()?;
     let pool = db::connect_database(&config.database_url).await?;
-
-    if config.seed_demo_data {
-        db::seed_demo_data(&pool).await?;
-    }
 
     let app = routes::router(pool)
         .layer(CorsLayer::permissive())
