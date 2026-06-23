@@ -330,75 +330,354 @@ Internet gerektirmeyen kullanim hedefi:
 Ileride merkezi sistem gerekirse ayni UI ve API mantigi sunucuya tasinabilir.
 PostgreSQL yalnizca bu asamada dusunulmeli.
 
-## Mevcut Repo Icin Ilk Duzeltmeler
+## Hemen Uygulanacak Yol Haritasi
 
-Mevcut scaffold iyi bir baslangic ama su degisiklikler oncelikli:
+Bu bolum task listesi gibi kullanilabilir. Her adim kucuk, test edilebilir ve
+bir sonraki adimi acacak sekilde yazilmistir.
 
-1. Demo `samples` semasini gercek CSV kolonlarina gore degistir.
-2. `collector` icine CSV import endpoint'i ekle.
-3. Frontend'e import ekrani ekle.
-4. Gecmis kosu listesini gercek SQLite verisinden besle.
-5. ECharts grafigini CSV kolon gruplarina gore yeniden kur.
-6. `RAF3=850` ve zaman bosluklari icin quality event uret.
-7. Production modda Axum'un built frontend'i serve etmesini sagla.
-8. Tauri'yi simdilik yalnizca opsiyonel paketleme olarak tut.
+### 0. Kararlari Sabitle
 
-## Uygulama Sirasi
+Bu adim koddan once netlik saglar.
 
-### Sprint 1: CSV import ve gercek sema
+- Ana kullanim: browser UI + lokal Axum API.
+- CSV secimi: browser dosya seciciden upload edilir; server yerel dosya path'i
+  beklemez.
+- Tauri: simdilik paketleme opsiyonu, MVP akisini belirlemez.
+- Veri modeli: ilk surumda genis `samples` tablosu.
+- Demo seed: CSV import baslayinca kaldirilir veya sadece development flag'iyle
+  calisir.
 
-- Migration'i CSV kolonlarina gore yenile.
-- Rust `csv` parser ekle.
-- Dosya hash'i hesapla.
-- Import preview endpoint'i yaz.
-- Import commit endpoint'i yaz.
-- Ornek CSV icin kabul kriterlerini sagla:
+Kabul:
+
+- Plan ve README ayni yonu soyluyor.
+- MVP icin Tauri, PostgreSQL, Parquet, Python ve Modbus isleri acikca park
+  edilmis durumda.
+
+### 1. Veritabani Semasini CSV'ye Uydur
+
+Mevcut demo semasi yerine CSV kolonlarina uygun sema kullanilacak.
+
+Dosyalar:
+
+- `migrations/20260623143000_initial.sql`
+- `collector/src/db.rs`
+- `collector/src/routes.rs`
+
+Yapilacaklar:
+
+- `runs` tablosuna `source_kind`, `source_name`, `started_at`, `finished_at`,
+  `status`, `notes` alanlari ver.
+- `import_files` tablosunu ekle.
+- `samples` tablosunu CSV kolonlariyla genis tablo yap:
+  `raf1`, `raf2`, `raf3`, `raf4`, `l_pres`, `h_pres`, `vacum`, `serp2`,
+  `serp4`, `kondanser`.
+- `quality_events` tablosunu ekle.
+- `file_sha256` icin unique index koy.
+- Demo veri seed'ini kaldir veya sadece `FREEZEDRY_SEED_DEMO=true` ise calistir.
+
+Kabul:
+
+- Bos veritabaninda migration calisir.
+- `cargo check -p collector` gecer.
+- Gerekirse dev veritabani `data/freezedry.db` silinip yeniden olusturulabilir.
+
+### 2. CSV Parser'i Backend'e Ekle
+
+Ilk gercek is CSV dosyasini guvenilir okumak.
+
+Dosyalar:
+
+- `collector/src/csv_import.rs`
+- `collector/src/routes.rs`
+- `collector/Cargo.toml`
+
+Bagimliliklar:
+
+- `csv`
+- `sha2`
+- Gerekirse `uuid`
+
+Yapilacaklar:
+
+- `;` delimiter kullan.
+- Beklenen header listesini kontrol et.
+- `TARIH SAAT` alanini `%Y-%m-%d-%H:%M:%S%.3f` formatinda parse et.
+- Saat dilimi bilgisi olmadigi icin ilk asamada kaynak timestamp metnini de
+  sakla.
+- `1.607629E-05` gibi bilimsel gosterimli sayilari parse et.
+- Satir numarasini sakla.
+- Dosya SHA-256 hesapla.
+- Medyan ornekleme araligini hesapla.
+- 240 saniyeden buyuk bosluklari raporla.
+- `RAF3=850.0` degerlerini `suspect` olarak isaretle.
+
+Kabul:
+
+- `LogFile_2026_01_26.csv` icin parser su sonucu verir:
   - 144 sample
   - 10 kanal
-  - 4 adet `RAF3=850` suspect event
-  - 7 adet 240 saniye ustu time gap event
+  - baslangic `2026-01-26-11:08:17.626`
+  - bitis `2026-01-26-18:51:16.967`
+  - 7 adet 240 saniye ustu time gap
+  - 4 adet `RAF3=850.0` suspect
 
-### Sprint 2: Web arayuz import/gecmis
+### 3. Import API'sini Yaz
 
-- Import ekranini ekle.
-- Import raporunu goster.
-- Gecmis kosular ekranini gercek API'ye bagla.
-- Ayni dosya importunu engelle.
+Web UI dosya upload edecegi icin endpoint multipart veya raw file upload kabul
+etmeli. En sade yol tek endpoint ile import etmektir; preview daha sonra
+ayrilabilir.
 
-### Sprint 3: Grafik ekrani
+Endpointler:
 
-- Kanal gruplarina gore ECharts ekranini kur.
-- Kanal ac/kapat kontrolleri ekle.
-- Zoom ve tooltip'i duzenle.
-- Supheli degerleri ana cizgiden ayir.
-- Zaman bosluklarini gorunur yap.
+```text
+POST /api/imports/csv
+GET  /api/imports/:id
+GET  /api/runs
+GET  /api/runs/:id
+GET  /api/runs/:id/samples
+GET  /api/runs/:id/quality-events
+```
 
-### Sprint 4: Replay ve basit canli izleme
+`POST /api/imports/csv` cevabi:
 
-- Import edilen run'i replay modunda oynat.
-- Canli grafik update akisini test et.
-- SQLite'a yazarken UI'in donmadigini dogrula.
+```json
+{
+  "run_id": 1,
+  "file_sha256": "...",
+  "row_count": 144,
+  "warning_count": 11,
+  "error_count": 0,
+  "started_at": "2026-01-26T11:08:17.626",
+  "finished_at": "2026-01-26T18:51:16.967"
+}
+```
 
-### Sprint 5: Lokal production calisma
+Yapilacaklar:
 
-- `npm run build` sonrasi Axum frontend serve etsin.
-- Tek komutla lokal calisma akisi olussun.
-- README kurulum/komutlari buna gore guncellensin.
+- Import transaction icinde calissin.
+- Ayni `file_sha256` varsa veri cogalmasin; mevcut run id donsun.
+- Parse hatalari response icinde raporlansin.
+- `quality_events` import sirasinda olussun.
+- `/api/runs/:id/samples` ham sample listesini dondursun.
+
+Kabul:
+
+- Ornek CSV import edilir.
+- Ayni CSV ikinci kez import edilince `samples` sayisi artmaz.
+- `/api/runs` import edilen run'i listeler.
+- `/api/runs/:id/samples` 144 satir dondurur.
+
+### 4. Backend Testlerini Ekle
+
+Kod ilerledikce parser davranisini sabitlemek gerekir.
+
+Dosyalar:
+
+- `collector/tests/csv_import.rs`
+- `fixtures/LogFile_2026_01_26.csv`
+
+Yapilacaklar:
+
+- Ornek CSV'yi `fixtures/` altina kopyala.
+- Parser unit/integration testi yaz.
+- Duplicate import testi yaz.
+- Quality event sayilarini test et.
+
+Kabul:
+
+```sh
+cargo test -p collector
+cargo check -p collector
+```
+
+ikisi de gecer.
+
+### 5. Frontend API Tiplerini Gercek Veriye Cevir
+
+Demo snapshot yerine gercek CSV veri tipleri kullanilacak.
+
+Dosyalar:
+
+- `src/api.ts`
+- `src/App.tsx`
+- `src/demoData.ts`
+
+Yapilacaklar:
+
+- `RunSummary`, `ImportReport`, `SampleRow`, `QualityEvent` Zod semalarini
+  ekle.
+- `fetchRuns`, `fetchRunSamples`, `uploadCsv` fonksiyonlarini yaz.
+- Demo datayi kaldir veya yalnizca backend kapaliyken bos-state icin kullan.
+
+Kabul:
+
+- `npm run build` gecer.
+- Frontend API tipleri backend response'lariyla uyumlu olur.
+
+### 6. Import Ekranini Yap
+
+Ilk kullanici degeri burada ortaya cikacak.
+
+Dosyalar:
+
+- `src/App.tsx`
+- `src/features/import/ImportPanel.tsx`
+- `src/styles.css`
+
+Yapilacaklar:
+
+- Dosya secme input'u ekle.
+- Upload progress veya loading state goster.
+- Import sonucu kartini goster:
+  - satir sayisi
+  - zaman araligi
+  - uyari sayisi
+  - hata sayisi
+- Basarili importtan sonra runs listesini yenile.
+- Hata durumlarini okunur goster.
+
+Kabul:
+
+- Browser'dan ornek CSV secilip import edilir.
+- Import sonrasi run listede gorunur.
+- Ayni dosya tekrar secilince veri cogalmaz ve kullaniciya bilgi verilir.
+
+### 7. Gecmis Kosular Ekranini Ayir
+
+Ana ekran tek sayfa kalabilir ama bolumler net ayrilmali.
+
+Dosyalar:
+
+- `src/features/runs/RunList.tsx`
+- `src/features/runs/RunDetail.tsx`
+- `src/App.tsx`
+
+Yapilacaklar:
+
+- Run listesi gercek `/api/runs` endpointinden beslensin.
+- Run secilince sample ve quality event sorgulari calissin.
+- Secili run URL state veya local React state ile tutulabilir.
+
+Kabul:
+
+- Sayfa yenilenince import edilmis kosular kaybolmaz.
+- Run secilince grafik bolumu o run'in verisini kullanir.
+
+### 8. Grafik Ekranini CSV Kanallarina Gore Kur
+
+Mevcut demo grafik yerine CSV kolon gruplari gosterilecek.
+
+Dosyalar:
+
+- `src/TelemetryChart.tsx`
+- `src/features/charts/ChannelControls.tsx`
+- `src/features/charts/channelConfig.ts`
+
+Kanal gruplari:
+
+- Raflar: `RAF1`, `RAF2`, `RAF3`, `RAF4`
+- Basinclar: `L_PRES`, `H_PRES`
+- Vakum: `VACUM`
+- Sogutma: `SERP2`, `SERP4`, `KONDANSER`
+
+Yapilacaklar:
+
+- Kanal ac/kapat kontrolu ekle.
+- `VACUM` icin ayri eksen veya ayri panel kullan.
+- `RAF3=850` ana cizgide `null` olsun, ayri warning marker olarak gorunsun.
+- Zaman bosluklarinda cizgi kesilsin.
+- Tooltip kalite bilgisini gostersin.
+
+Kabul:
+
+- `RAF3=850` grafigin olcegini bozmaz.
+- 10 kanal secilebilir durumdadir.
+- Zoom ve tooltip calisir.
+
+### 9. Basit Export Ekle
+
+Ilk export sadece secili run'i CSV olarak indirsin.
+
+Endpoint:
+
+```text
+GET /api/runs/:id/export.csv
+```
+
+Yapilacaklar:
+
+- Orijinal kolon sirasi korunur.
+- `TARIH SAAT` formatini kaynak formatina yakin dondur.
+- Frontend'e export butonu ekle.
+
+Kabul:
+
+- Import edilen run tekrar CSV indirilebilir.
+
+### 10. Lokal Production Modu
+
+Bu adim "internet yokken lokal calissin" hedefini kapatir.
+
+Dosyalar:
+
+- `collector/src/main.rs`
+- `collector/src/routes.rs`
+- `README.md`
+- `package.json`
+
+Yapilacaklar:
+
+- `npm run build` ile `dist/` olussun.
+- Collector production modda `dist/` klasorunu static serve etsin.
+- Tek komut dokumante edilsin:
+
+```sh
+npm run build
+cargo run -p collector
+```
+
+- Kullanici `http://127.0.0.1:4777` adresinden UI'a girebilsin.
+
+Kabul:
+
+- Vite dev server olmadan UI acilir.
+- API ve UI ayni porttan calisir.
+- Internet baglantisi gerekmez.
+
+## Sirali Is Listesi
+
+Uygulama sirasinda bu liste takip edilecek.
+
+1. Sema ve migration'i CSV modeline cevir.
+2. CSV parser modulu yaz.
+3. Parser testlerini ornek CSV ile sabitle.
+4. Import API'sini yaz.
+5. Duplicate import korumasini ekle.
+6. Runs/samples/quality endpointlerini bitir.
+7. Frontend Zod semalarini gercek API'ye uydur.
+8. Import panelini yap.
+9. Run listesi ve run secimini yap.
+10. Grafik kanal gruplarini kur.
+11. Supheli deger ve zaman boslugu gosterimini ekle.
+12. CSV export ekle.
+13. Axum static frontend serve etsin.
+14. README'i calistirma komutlariyla guncelle.
+15. Tauri'yi opsiyonel durumda birak.
 
 ## Basari Kriterleri
 
 Ilk kullanisli surum su senaryoyu tamamlamali:
 
-1. Kullanici `LogFile_2026_01_26.csv` dosyasini secer.
-2. Uygulama dosyayi analiz eder ve uyarilari gosterir.
-3. Kullanici import eder.
+1. Kullanici browser'dan `LogFile_2026_01_26.csv` dosyasini secer.
+2. Uygulama dosyayi upload eder ve import eder.
+3. Import raporu 144 satir, 7 time gap ve 4 suspect `RAF3` degeri gosterir.
 4. Run gecmis listesine eklenir.
 5. Uygulama kapatip acinca run kaybolmaz.
 6. Grafik ekraninda tum kanallar incelenebilir.
 7. `RAF3=850` grafigi bozmaz.
 8. Zaman bosluklari fark edilir.
 9. Ayni dosya ikinci kez veri cogaltmaz.
-10. Internet olmadan lokal bilgisayarda calisir.
+10. Vite dev server olmadan `http://127.0.0.1:4777` uzerinden lokal calisir.
 
 ## Daha Sonra Dusunulecekler
 
