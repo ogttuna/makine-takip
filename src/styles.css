@@ -386,6 +386,16 @@ h2 {
   font-size: 0.86rem;
 }
 
+.unit-note {
+  margin: -4px 0 14px;
+  border-left: 3px solid #0891b2;
+  background: #f8fafc;
+  color: #526176;
+  padding: 9px 11px;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
 .channel-control-shell {
   display: grid;
   gap: 8px;
@@ -431,6 +441,9 @@ h2 {
 }
 
 .channel-button {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
   min-height: 34px;
   border: 1px solid #cbd5e1;
   border-radius: 6px;
@@ -441,9 +454,20 @@ h2 {
   font-weight: 700;
 }
 
+.channel-button small {
+  color: #667085;
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
 .channel-button.active {
   border-color: #0891b2;
   background: #ecfeff;
+  color: #0e7490;
+}
+
+.channel-button.active small {
   color: #0e7490;
 }
 

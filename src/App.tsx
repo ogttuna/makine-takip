@@ -10,7 +10,12 @@ import {
   uploadCsv,
 } from "./api";
 import type { ImportReport, QualityEvent, RunSummary, SampleFrame } from "./api";
-import { getChannelConfig, sortChannels } from "./channelConfig";
+import {
+  getChannelConfig,
+  SHELF_AVERAGE_CHANNEL,
+  SHELF_CHANNELS,
+  sortChannels,
+} from "./channelConfig";
 
 type QualityFilter = "all" | "time_gap" | "suspect_value";
 
@@ -57,7 +62,15 @@ export function App() {
   });
   const samples = samplesQuery.data ?? [];
   const qualityEvents = qualityEventsQuery.data ?? [];
-  const channelCodes = useMemo(() => getChannelCodes(samples), [samples]);
+  const rawChannelCodes = useMemo(() => getRawChannelCodes(samples), [samples]);
+  const channelCodes = useMemo(
+    () => withDerivedChannels(rawChannelCodes),
+    [rawChannelCodes],
+  );
+  const derivedChannelCount = channelCodes.length - rawChannelCodes.length;
+  const pendingUnitChannels = rawChannelCodes.filter(
+    (channel) => !getChannelConfig(channel).unit,
+  );
   const activeVisibleChannels = visibleChannels.filter((channel) =>
     channelCodes.includes(channel),
   );
@@ -162,8 +175,12 @@ export function App() {
           }
         />
         <Metric
-          hint={`${activeVisibleChannels.length} visible`}
-          label="Channels"
+          hint={
+            derivedChannelCount > 0
+              ? `${rawChannelCodes.length} raw + ${derivedChannelCount} derived`
+              : `${rawChannelCodes.length} raw`
+          }
+          label="Signals"
           value={String(channelCodes.length)}
         />
         <Metric
@@ -192,6 +209,7 @@ export function App() {
             samples={samples}
             warningCount={selectedRun?.warning_count ?? qualityEvents.length}
           />
+          <UnitNote pendingChannels={pendingUnitChannels} />
 
           <ChannelControls
             channels={channelCodes}
@@ -423,6 +441,24 @@ function OverviewItem({ label, value }: { label: string; value: string }) {
   );
 }
 
+function UnitNote({ pendingChannels }: { pendingChannels: string[] }) {
+  if (pendingChannels.length === 0) {
+    return (
+      <p className="unit-note">
+        Units are assigned from channel config. Shelf, cooling and condenser values
+        are marked as degC.
+      </p>
+    );
+  }
+
+  return (
+    <p className="unit-note">
+      Units are not present in the CSV. Temperature channels use configured degC;
+      confirm units for {pendingChannels.join(", ")}.
+    </p>
+  );
+}
+
 function ChannelControls({
   channels,
   visibleChannels,
@@ -447,7 +483,7 @@ function ChannelControls({
   return (
     <div className="channel-control-shell">
       <div className="control-heading">
-        <strong>Channels</strong>
+        <strong>Signals</strong>
         <span>
           {visibleChannels.length} of {channels.length} visible
         </span>
@@ -472,6 +508,13 @@ function ChannelControls({
       <div className="channel-controls">
         {channels.map((channel) => {
           const active = visibleChannels.includes(channel);
+          const config = getChannelConfig(channel);
+          const secondaryLabel = [
+            config.unit,
+            config.derived ? "derived" : null,
+          ]
+            .filter(Boolean)
+            .join(" - ");
 
           return (
             <button
@@ -487,7 +530,8 @@ function ChannelControls({
               }}
               type="button"
             >
-              {channel}
+              <span>{config.label}</span>
+              {secondaryLabel ? <small>{secondaryLabel}</small> : null}
             </button>
           );
         })}
@@ -755,7 +799,7 @@ function InlineError({
   );
 }
 
-function getChannelCodes(samples: SampleFrame[]): string[] {
+function getRawChannelCodes(samples: SampleFrame[]): string[] {
   const channels = new Set<string>();
 
   for (const sample of samples) {
@@ -765,6 +809,18 @@ function getChannelCodes(samples: SampleFrame[]): string[] {
   }
 
   return sortChannels([...channels]);
+}
+
+function withDerivedChannels(channels: string[]): string[] {
+  const shelfChannelCount = SHELF_CHANNELS.filter((channel) =>
+    channels.includes(channel),
+  ).length;
+
+  if (shelfChannelCount < 2 || channels.includes(SHELF_AVERAGE_CHANNEL)) {
+    return sortChannels(channels);
+  }
+
+  return sortChannels([...channels, SHELF_AVERAGE_CHANNEL]);
 }
 
 function runRangeLabel(run: RunSummary | null): string {

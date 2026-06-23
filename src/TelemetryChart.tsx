@@ -15,7 +15,12 @@ import { CanvasRenderer } from "echarts/renderers";
 import { useEffect, useMemo, useRef } from "react";
 
 import type { QualityEvent, SampleFrame } from "./api";
-import { getChannelConfig, sortChannels } from "./channelConfig";
+import {
+  getChannelConfig,
+  SHELF_AVERAGE_CHANNEL,
+  SHELF_CHANNELS,
+  sortChannels,
+} from "./channelConfig";
 
 type TelemetryChartProps = {
   samples: SampleFrame[];
@@ -196,6 +201,31 @@ function buildSeries(
 
   for (const channel of channels) {
     const config = getChannelConfig(channel);
+
+    if (channel === SHELF_AVERAGE_CHANNEL) {
+      result.push({
+        name: seriesName(config),
+        type: "line",
+        yAxisIndex: 0,
+        showSymbol: false,
+        smooth: 0.15,
+        connectNulls: false,
+        lineStyle: {
+          color: config.color,
+          width: 2.4,
+          type: "dashed",
+        },
+        itemStyle: {
+          color: config.color,
+        },
+        emphasis: {
+          focus: "series",
+        },
+        data: shelfAverageLineData(samples, eventByFrameChannel),
+      });
+      continue;
+    }
+
     const channelValues = numericValuesForChannel(samples, channel).filter(
       (point) => point.quality === "good",
     );
@@ -242,12 +272,18 @@ function buildSeries(
     }
 
     result.push({
-      name: config.label,
+      name: seriesName(config),
       type: "line",
       yAxisIndex: config.axis === "vacuum" ? 1 : 0,
       showSymbol: false,
       smooth: 0.15,
       connectNulls: false,
+      lineStyle: {
+        color: config.color,
+      },
+      itemStyle: {
+        color: config.color,
+      },
       emphasis: {
         focus: "series",
       },
@@ -256,12 +292,15 @@ function buildSeries(
 
     if (suspectData.length > 0) {
       result.push({
-        name: `${config.label} suspect`,
+        name: `${seriesName(config)} suspect`,
         type: "scatter",
         yAxisIndex: config.axis === "vacuum" ? 1 : 0,
         symbol: "diamond",
         symbolSize: 10,
         data: suspectData,
+        itemStyle: {
+          color: "#b91c1c",
+        },
         emphasis: {
           focus: "series",
         },
@@ -269,11 +308,63 @@ function buildSeries(
           valueFormatter: (_value) => "suspect",
         },
       });
-      colors.push("#b91c1c");
     }
   }
 
   return { colors, series: result };
+}
+
+function seriesName(config: ReturnType<typeof getChannelConfig>): string {
+  return config.unit ? `${config.label} (${config.unit})` : config.label;
+}
+
+function shelfAverageLineData(
+  samples: SampleFrame[],
+  eventByFrameChannel: Set<string>,
+): Array<[string, number | null]> {
+  const lineData: Array<[string, number | null]> = [];
+  let previousTimestamp: number | null = null;
+
+  for (const sample of samples) {
+    const timestamp = sample.sampled_at;
+    const timestampMs = Date.parse(timestamp);
+    const isGap = previousTimestamp !== null && timestampMs - previousTimestamp > 240_000;
+
+    if (isGap && previousTimestamp !== null) {
+      lineData.push([new Date(previousTimestamp + 1).toISOString(), null]);
+      lineData.push([new Date(timestampMs - 1).toISOString(), null]);
+    }
+
+    previousTimestamp = Number.isFinite(timestampMs) ? timestampMs : previousTimestamp;
+
+    const values = SHELF_CHANNELS.flatMap((channel) => {
+      const measurement = sample.measurements.find(
+        (item) => item.channel_code === channel,
+      );
+
+      if (
+        !measurement ||
+        measurement.numeric_value === null ||
+        measurement.quality !== "good" ||
+        eventByFrameChannel.has(`${sample.id}:${channel}`)
+      ) {
+        return [];
+      }
+
+      return [measurement.numeric_value];
+    });
+
+    if (values.length === 0) {
+      lineData.push([timestamp, null]);
+      continue;
+    }
+
+    const average =
+      values.reduce((total, value) => total + value, 0) / values.length;
+    lineData.push([timestamp, average]);
+  }
+
+  return lineData;
 }
 
 function formatAxisTime(value: number | string): string {
