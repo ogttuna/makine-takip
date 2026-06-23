@@ -27,6 +27,15 @@ select {
   font: inherit;
 }
 
+button {
+  cursor: pointer;
+}
+
+button:disabled,
+input:disabled {
+  cursor: not-allowed;
+}
+
 code {
   border-radius: 4px;
   background: #e8edf5;
@@ -205,6 +214,47 @@ h2 {
   min-height: 420px;
 }
 
+.empty-chart {
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  width: 100%;
+  height: min(48vh, 420px);
+  min-height: 280px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  color: #667085;
+  text-align: center;
+}
+
+.empty-chart strong {
+  color: #1f2937;
+}
+
+.channel-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.channel-button {
+  min-height: 34px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #475569;
+  padding: 6px 10px;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.channel-button.active {
+  border-color: #0891b2;
+  background: #ecfeff;
+  color: #0e7490;
+}
+
 .run-badge {
   display: grid;
   gap: 3px;
@@ -239,9 +289,18 @@ h2 {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  width: 100%;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
+  background: #ffffff;
+  color: inherit;
   padding: 12px;
+  text-align: left;
+}
+
+.run-row.selected {
+  border-color: #0891b2;
+  background: #ecfeff;
 }
 
 .run-row div {
@@ -278,6 +337,88 @@ h2 {
 
 .collector-note span {
   line-height: 1.5;
+}
+
+.import-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.file-drop {
+  position: relative;
+  display: grid;
+  gap: 5px;
+  border: 1px dashed #94a3b8;
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 14px;
+  overflow: hidden;
+}
+
+.file-drop input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  opacity: 0;
+}
+
+.file-drop strong {
+  color: #111827;
+  font-size: 0.92rem;
+}
+
+.file-drop span,
+.error-text,
+.quality-summary span {
+  color: #667085;
+  font-size: 0.84rem;
+}
+
+.error-text {
+  color: #b91c1c;
+  line-height: 1.4;
+}
+
+.import-report,
+.quality-summary {
+  display: grid;
+  gap: 8px;
+  border-left: 3px solid #16a34a;
+  background: #f0fdf4;
+  padding: 12px;
+}
+
+.quality-summary {
+  border-left-color: #d97706;
+  background: #fffbeb;
+}
+
+.import-report dl,
+.quality-summary dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.import-report dl div,
+.quality-summary dl div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.import-report dt,
+.quality-summary dt {
+  color: #667085;
+  font-size: 0.8rem;
+}
+
+.import-report dd,
+.quality-summary dd {
+  margin: 0;
+  color: #111827;
+  font-size: 0.84rem;
+  font-weight: 800;
 }
 
 @media (max-width: 980px) {

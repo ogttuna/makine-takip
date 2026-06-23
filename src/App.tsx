@@ -1,38 +1,101 @@
-import { useQuery } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
 
-import { fetchLiveSnapshot, fetchRuns, getCollectorUrl } from "./api";
-import type { LiveSnapshot, RunSummary, TelemetrySample } from "./api";
-import { createDemoSnapshot } from "./demoData";
+import {
+  fetchQualityEvents,
+  fetchRunSamples,
+  fetchRuns,
+  getCollectorUrl,
+  uploadCsv,
+} from "./api";
+import type { ImportReport, QualityEvent, RunSummary, SampleFrame } from "./api";
+import { sortChannels } from "./channelConfig";
 import { TelemetryChart } from "./TelemetryChart";
 
 export function App() {
-  const demoSnapshot = useMemo(() => createDemoSnapshot(), []);
-  const liveQuery = useQuery({
-    queryKey: ["live-snapshot"],
-    queryFn: fetchLiveSnapshot,
-    refetchInterval: 2_000,
-  });
+  const queryClient = useQueryClient();
+  const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
+  const [visibleChannels, setVisibleChannels] = useState<string[]>([]);
+  const [lastImportReport, setLastImportReport] = useState<ImportReport | null>(null);
   const runsQuery = useQuery({
     queryKey: ["runs"],
     queryFn: fetchRuns,
     refetchInterval: 10_000,
   });
+  const selectedRun = useMemo(
+    () => runsQuery.data?.find((run) => run.id === selectedRunId) ?? null,
+    [runsQuery.data, selectedRunId],
+  );
+  const samplesQuery = useQuery({
+    queryKey: ["run-samples", selectedRunId],
+    queryFn: () => fetchRunSamples(selectedRunId!),
+    enabled: selectedRunId !== null,
+  });
+  const qualityEventsQuery = useQuery({
+    queryKey: ["run-quality-events", selectedRunId],
+    queryFn: () => fetchQualityEvents(selectedRunId!),
+    enabled: selectedRunId !== null,
+  });
+  const importMutation = useMutation({
+    mutationFn: uploadCsv,
+    onSuccess: async (report) => {
+      setLastImportReport(report);
+      setSelectedRunId(report.run_id);
+      await queryClient.invalidateQueries({ queryKey: ["runs"] });
+      await queryClient.invalidateQueries({ queryKey: ["run-samples", report.run_id] });
+      await queryClient.invalidateQueries({
+        queryKey: ["run-quality-events", report.run_id],
+      });
+    },
+  });
+  const samples = samplesQuery.data ?? [];
+  const qualityEvents = qualityEventsQuery.data ?? [];
+  const channelCodes = useMemo(() => getChannelCodes(samples), [samples]);
+  const activeVisibleChannels = visibleChannels.filter((channel) =>
+    channelCodes.includes(channel),
+  );
 
-  const snapshot = liveQuery.data ?? demoSnapshot;
-  const latest = snapshot.samples.at(-1);
-  const runs = runsQuery.data ?? (snapshot.active_run ? [snapshot.active_run] : []);
-  const sourceLabel = liveQuery.data ? "Collector online" : "Demo data";
+  useEffect(() => {
+    const runs = runsQuery.data ?? [];
+
+    if (runs.length === 0) {
+      setSelectedRunId(null);
+      return;
+    }
+
+    if (selectedRunId === null || !runs.some((run) => run.id === selectedRunId)) {
+      setSelectedRunId(runs[0].id);
+    }
+  }, [runsQuery.data, selectedRunId]);
+
+  useEffect(() => {
+    if (channelCodes.length === 0) {
+      setVisibleChannels([]);
+      return;
+    }
+
+    setVisibleChannels((current) => {
+      const filtered = current.filter((channel) => channelCodes.includes(channel));
+
+      if (filtered.length === 0) {
+        return channelCodes;
+      }
+
+      return filtered;
+    });
+  }, [channelCodes]);
+
+  const sourceLabel = runsQuery.isError ? "Collector offline" : "Collector online";
 
   return (
     <main className="app-shell">
       <header className="topbar">
         <div>
           <p className="eyebrow">FreezeDryMachine</p>
-          <h1>Canli Proses Izleme</h1>
+          <h1>CSV Import ve Grafik</h1>
         </div>
         <div className="connection-strip">
-          <span className={liveQuery.data ? "status-dot online" : "status-dot"} />
+          <span className={runsQuery.isError ? "status-dot" : "status-dot online"} />
           <div>
             <strong>{sourceLabel}</strong>
             <span>{getCollectorUrl()}</span>
@@ -41,42 +104,169 @@ export function App() {
       </header>
 
       <section className="summary-grid">
-        <Metric label="Phase" value={latest?.phase ?? "idle"} />
-        <Metric label="Shelf" value={formatMetric(latest?.shelf_temp_c, "C")} />
-        <Metric label="Product" value={formatMetric(latest?.product_temp_c, "C")} />
-        <Metric label="Pressure" value={formatMetric(latest?.chamber_pressure_mbar, "mbar", 4)} />
+        <Metric label="Runs" value={String(runsQuery.data?.length ?? 0)} />
+        <Metric label="Samples" value={String(selectedRun?.row_count ?? samples.length)} />
+        <Metric label="Channels" value={String(channelCodes.length)} />
+        <Metric label="Warnings" value={String(selectedRun?.warning_count ?? qualityEvents.length)} />
       </section>
 
       <section className="workspace">
         <div className="chart-panel">
           <div className="section-heading">
             <div>
-              <h2>Telemetry</h2>
-              <p>{snapshot.samples.length} sample points</p>
+              <h2>{selectedRun?.name ?? "No run selected"}</h2>
+              <p>{runRangeLabel(selectedRun)}</p>
             </div>
-            <RunBadge snapshot={snapshot} />
+            <RunBadge run={selectedRun} />
           </div>
-          <TelemetryChart samples={snapshot.samples} />
+
+          <ChannelControls
+            channels={channelCodes}
+            visibleChannels={activeVisibleChannels}
+            onChange={setVisibleChannels}
+          />
+
+          {samples.length > 0 ? (
+            <TelemetryChart
+              qualityEvents={qualityEvents}
+              samples={samples}
+              visibleChannels={activeVisibleChannels}
+            />
+          ) : (
+            <div className="empty-chart">
+              <strong>No samples loaded</strong>
+              <span>Import a CSV file or select a stored run.</span>
+            </div>
+          )}
         </div>
 
         <aside className="side-panel">
+          <ImportPanel
+            error={importMutation.error}
+            isPending={importMutation.isPending}
+            lastReport={lastImportReport}
+            onUpload={(file) => importMutation.mutate(file)}
+          />
+
           <div className="section-heading compact">
             <div>
               <h2>Recent Runs</h2>
-              <p>{runs.length} indexed</p>
+              <p>{runsQuery.data?.length ?? 0} indexed</p>
             </div>
           </div>
-          <RunList runs={runs} />
-          <div className="collector-note">
-            <strong>Collector</strong>
-            <span>
-              Start with <code>npm run collector:dev</code>. The UI polls
-              <code> /api/live</code> and validates responses with Zod.
-            </span>
-          </div>
+          <RunList
+            onSelect={setSelectedRunId}
+            runs={runsQuery.data ?? []}
+            selectedRunId={selectedRunId}
+          />
+
+          <QualitySummary events={qualityEvents} />
         </aside>
       </section>
     </main>
+  );
+}
+
+function ImportPanel({
+  error,
+  isPending,
+  lastReport,
+  onUpload,
+}: {
+  error: Error | null;
+  isPending: boolean;
+  lastReport: ImportReport | null;
+  onUpload: (file: File) => void;
+}) {
+  return (
+    <section className="import-panel">
+      <div className="section-heading compact">
+        <div>
+          <h2>CSV Import</h2>
+          <p>Upload the machine log file from this computer.</p>
+        </div>
+      </div>
+      <label className="file-drop">
+        <input
+          accept=".csv,text/csv"
+          disabled={isPending}
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0];
+            event.currentTarget.value = "";
+
+            if (file) {
+              onUpload(file);
+            }
+          }}
+          type="file"
+        />
+        <strong>{isPending ? "Importing..." : "Choose CSV"}</strong>
+        <span>Expected delimiter is semicolon.</span>
+      </label>
+      {lastReport ? <ImportReportView report={lastReport} /> : null}
+      {error ? <p className="error-text">{error.message}</p> : null}
+    </section>
+  );
+}
+
+function ImportReportView({ report }: { report: ImportReport }) {
+  return (
+    <div className="import-report">
+      <strong>{report.duplicate ? "Already imported" : "Import complete"}</strong>
+      <dl>
+        <div>
+          <dt>Rows</dt>
+          <dd>{report.row_count}</dd>
+        </div>
+        <div>
+          <dt>Channels</dt>
+          <dd>{report.channel_count}</dd>
+        </div>
+        <div>
+          <dt>Warnings</dt>
+          <dd>{report.warning_count}</dd>
+        </div>
+      </dl>
+    </div>
+  );
+}
+
+function ChannelControls({
+  channels,
+  visibleChannels,
+  onChange,
+}: {
+  channels: string[];
+  visibleChannels: string[];
+  onChange: (channels: string[]) => void;
+}) {
+  if (channels.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="channel-controls">
+      {channels.map((channel) => {
+        const active = visibleChannels.includes(channel);
+
+        return (
+          <button
+            className={active ? "channel-button active" : "channel-button"}
+            key={channel}
+            onClick={() => {
+              if (active) {
+                onChange(visibleChannels.filter((item) => item !== channel));
+              } else {
+                onChange(sortChannels([...visibleChannels, channel]));
+              }
+            }}
+            type="button"
+          >
+            {channel}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -95,18 +285,24 @@ function Metric({
   );
 }
 
-function RunBadge({ snapshot }: { snapshot: LiveSnapshot }) {
-  const run = snapshot.active_run;
-
+function RunBadge({ run }: { run: RunSummary | null }) {
   return (
     <div className="run-badge">
-      <span>{snapshot.status}</span>
-      <strong>{run?.recipe_name ?? "No active run"}</strong>
+      <span>{run?.status ?? "idle"}</span>
+      <strong>{run?.source_kind ?? "No source"}</strong>
     </div>
   );
 }
 
-function RunList({ runs }: { runs: RunSummary[] }) {
+function RunList({
+  onSelect,
+  runs,
+  selectedRunId,
+}: {
+  onSelect: (runId: number) => void;
+  runs: RunSummary[];
+  selectedRunId: number | null;
+}) {
   if (runs.length === 0) {
     return <p className="empty-state">No runs stored yet.</p>;
   }
@@ -114,24 +310,68 @@ function RunList({ runs }: { runs: RunSummary[] }) {
   return (
     <div className="run-list">
       {runs.map((run) => (
-        <article className="run-row" key={run.id}>
+        <button
+          className={run.id === selectedRunId ? "run-row selected" : "run-row"}
+          key={run.id}
+          onClick={() => onSelect(run.id)}
+          type="button"
+        >
           <div>
-            <strong>{run.recipe_name}</strong>
-            <span>{run.batch_code ?? "no batch"}</span>
+            <strong>{run.name}</strong>
+            <span>
+              {run.row_count} rows, {run.warning_count} warnings
+            </span>
           </div>
-          <time>{formatDate(run.started_at)}</time>
-        </article>
+          <time>{run.started_at ? formatDate(run.started_at) : "-"}</time>
+        </button>
       ))}
     </div>
   );
 }
 
-function formatMetric(value: number | undefined, unit: string, digits = 1): string {
-  if (value === undefined) {
-    return "-";
+function QualitySummary({ events }: { events: QualityEvent[] }) {
+  const counts = events.reduce<Record<string, number>>((acc, event) => {
+    acc[event.event_type] = (acc[event.event_type] ?? 0) + 1;
+    return acc;
+  }, {});
+
+  return (
+    <div className="quality-summary">
+      <strong>Quality</strong>
+      {events.length === 0 ? (
+        <span>No warnings for selected run.</span>
+      ) : (
+        <dl>
+          {Object.entries(counts).map(([eventType, count]) => (
+            <div key={eventType}>
+              <dt>{eventType}</dt>
+              <dd>{count}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+    </div>
+  );
+}
+
+function getChannelCodes(samples: SampleFrame[]): string[] {
+  const channels = new Set<string>();
+
+  for (const sample of samples) {
+    for (const measurement of sample.measurements) {
+      channels.add(measurement.channel_code);
+    }
   }
 
-  return `${value.toFixed(digits)} ${unit}`;
+  return sortChannels([...channels]);
+}
+
+function runRangeLabel(run: RunSummary | null): string {
+  if (!run?.started_at || !run.finished_at) {
+    return "Import a run to inspect its samples.";
+  }
+
+  return `${formatDate(run.started_at)} - ${formatDate(run.finished_at)}`;
 }
 
 function formatDate(value: string): string {
