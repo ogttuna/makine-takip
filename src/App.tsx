@@ -34,11 +34,11 @@ const CHART_GROUPS: Array<{
   title: string;
   note: string;
 }> = [
-  { group: "shelf", title: "Shelves", note: "Shelf probes and optional functions" },
-  { group: "pressure", title: "Pressure", note: "Low and high pressure channels" },
-  { group: "vacuum", title: "Vacuum", note: "Log scale vacuum channel" },
-  { group: "cooling", title: "Cooling", note: "Cooling and condenser channels" },
-  { group: "other", title: "Other", note: "Unmapped imported signals" },
+  { group: "shelf", title: "Raflar", note: "Raf probları ve seçili analiz fonksiyonları" },
+  { group: "pressure", title: "Basınç", note: "Düşük ve yüksek basınç kanalları" },
+  { group: "vacuum", title: "Vakum", note: "Log ölçekte vakum kanalı" },
+  { group: "cooling", title: "Soğutma", note: "Soğutma ve kondenser kanalları" },
+  { group: "other", title: "Diğer", note: "Henüz eşlenmemiş import sinyalleri" },
 ];
 
 const TelemetryChart = lazy(() =>
@@ -139,10 +139,10 @@ export function App() {
   }, [selectedRunId]);
 
   const sourceLabel = runsQuery.isError
-    ? "Collector offline"
+    ? "Collector erişilemiyor"
     : isRefreshing
-      ? "Syncing"
-      : "Collector online";
+      ? "Senkronize ediliyor"
+      : "Collector bağlı";
   const refreshData = async () => {
     await queryClient.invalidateQueries({ queryKey: ["runs"] });
 
@@ -161,8 +161,8 @@ export function App() {
       <header className="topbar">
         <div className="topbar-title">
           <p className="eyebrow">FreezeDryMachine</p>
-          <h1>Run Review</h1>
-          <p>Local CSV workspace for freeze dry telemetry.</p>
+          <h1>Çalışma İncelemesi</h1>
+          <p>Freeze dry makine loglarını yerel olarak incele.</p>
         </div>
         <div className="connection-strip" aria-busy={isRefreshing}>
           <div className="connection-state">
@@ -181,20 +181,20 @@ export function App() {
             onClick={refreshData}
             type="button"
           >
-            Refresh
+            Yenile
           </button>
         </div>
       </header>
 
       <section className="summary-grid">
         <Metric
-          hint="stored"
-          label="Runs"
+          hint="kayıtlı"
+          label="Çalışmalar"
           value={runsQuery.isLoading ? "..." : String(runsQuery.data?.length ?? 0)}
         />
         <Metric
-          hint="selected"
-          label="Samples"
+          hint="seçili"
+          label="Örnekler"
           value={
             samplesQuery.isLoading
               ? "..."
@@ -204,15 +204,15 @@ export function App() {
         <Metric
           hint={
             derivedChannelCount > 0
-              ? `${rawChannelCodes.length} raw + ${derivedChannelCount} derived`
-              : `${rawChannelCodes.length} raw`
+              ? `${rawChannelCodes.length} ham + ${derivedChannelCount} türetilmiş`
+              : `${rawChannelCodes.length} ham`
           }
-          label="Signals"
+          label="Sinyaller"
           value={String(channelCodes.length)}
         />
         <Metric
-          hint={selectedRun ? "selected run" : "none selected"}
-          label="Warnings"
+          hint={selectedRun ? "seçili çalışma" : "seçili çalışma yok"}
+          label="Uyarılar"
           value={
             qualityEventsQuery.isLoading
               ? "..."
@@ -225,7 +225,7 @@ export function App() {
         <div className="chart-panel">
           <div className="section-heading">
             <div>
-              <h2>{selectedRun?.name ?? "No run selected"}</h2>
+              <h2>{selectedRun?.name ?? "Çalışma seçilmedi"}</h2>
               <p>{runRangeLabel(selectedRun)}</p>
             </div>
             <RunActions run={selectedRun} />
@@ -254,26 +254,26 @@ export function App() {
 
           {samplesQuery.isLoading ? (
             <ChartState
-              message="Loading stored samples from the collector."
-              title="Loading run"
+              message="Kayıtlı örnekler collector servisinden yükleniyor."
+              title="Çalışma yükleniyor"
             />
           ) : samplesQuery.isError ? (
             <ChartState
-              actionLabel="Retry"
+              actionLabel="Tekrar dene"
               message={samplesQuery.error.message}
               onAction={() => samplesQuery.refetch()}
               tone="error"
-              title="Samples could not be loaded"
+              title="Örnekler yüklenemedi"
             />
           ) : samples.length === 0 ? (
             <ChartState
-              message="Import a CSV file or select a stored run."
-              title="No samples loaded"
+              message="Bir CSV dosyası içe aktar veya kayıtlı bir çalışma seç."
+              title="Örnek yok"
             />
           ) : activeVisibleChannels.length === 0 ? (
             <ChartState
-              message="Choose at least one channel to draw the chart."
-              title="No channels selected"
+              message="Grafik çizmek için en az bir kanal seç."
+              title="Kanal seçilmedi"
             />
           ) : (
             <ChartArea
@@ -295,8 +295,8 @@ export function App() {
 
           <div className="section-heading compact">
             <div>
-              <h2>Recent Runs</h2>
-              <p>{runsQuery.data?.length ?? 0} indexed</p>
+              <h2>Kayıtlı Çalışmalar</h2>
+              <p>{runsQuery.data?.length ?? 0} indeksli</p>
             </div>
           </div>
           <RunList
@@ -341,7 +341,7 @@ function ImportPanel({
     }
 
     if (!file.name.toLowerCase().endsWith(".csv")) {
-      setLocalError("Use a .csv machine log file.");
+      setLocalError("Makine logu için .csv uzantılı dosya seç.");
       return;
     }
 
@@ -354,8 +354,8 @@ function ImportPanel({
     <section className="import-panel">
       <div className="section-heading compact">
         <div>
-          <h2>CSV Import</h2>
-          <p>Machine log from this computer.</p>
+          <h2>CSV İçe Aktar</h2>
+          <p>Bu bilgisayardaki makine logu.</p>
         </div>
       </div>
       <label
@@ -379,7 +379,7 @@ function ImportPanel({
       >
         <input
           accept=".csv,text/csv"
-          aria-label="Choose CSV file"
+          aria-label="CSV dosyası seç"
           disabled={isPending}
           onChange={(event) => {
             const file = event.currentTarget.files?.[0];
@@ -388,8 +388,8 @@ function ImportPanel({
           }}
           type="file"
         />
-        <strong>{isPending ? "Importing..." : "Drop or choose CSV"}</strong>
-        <span>Semicolon-delimited machine log.</span>
+        <strong>{isPending ? "İçe aktarılıyor..." : "CSV sürükle veya seç"}</strong>
+        <span>Noktalı virgül ayraçlı makine logu.</span>
       </label>
       {lastReport ? <ImportReportView report={lastReport} /> : null}
       {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
@@ -400,19 +400,19 @@ function ImportPanel({
 function ImportReportView({ report }: { report: ImportReport }) {
   return (
     <div className="import-report">
-      <strong>{report.duplicate ? "Already imported" : "Import complete"}</strong>
+      <strong>{report.duplicate ? "Zaten içe aktarılmış" : "İçe aktarma tamamlandı"}</strong>
       <span>{report.file_name}</span>
       <dl>
         <div>
-          <dt>Rows</dt>
+          <dt>Satır</dt>
           <dd>{report.row_count}</dd>
         </div>
         <div>
-          <dt>Channels</dt>
+          <dt>Kanal</dt>
           <dd>{report.channel_count}</dd>
         </div>
         <div>
-          <dt>Warnings</dt>
+          <dt>Uyarı</dt>
           <dd>{report.warning_count}</dd>
         </div>
       </dl>
@@ -434,20 +434,20 @@ function RunOverview({
 
   return (
     <div className="run-overview">
-      <OverviewItem label="Duration" value={durationLabel(run)} />
+      <OverviewItem label="Süre" value={durationLabel(run)} />
       <OverviewItem
-        label="First sample"
+        label="İlk örnek"
         value={
           firstSample ? formatDate(firstSample.sampled_at) : shortDate(run?.started_at)
         }
       />
       <OverviewItem
-        label="Last sample"
+        label="Son örnek"
         value={
           lastSample ? formatDate(lastSample.sampled_at) : shortDate(run?.finished_at)
         }
       />
-      <OverviewItem label="Warnings" value={String(warningCount)} />
+      <OverviewItem label="Uyarı" value={String(warningCount)} />
     </div>
   );
 }
@@ -465,16 +465,17 @@ function UnitNote({ pendingChannels }: { pendingChannels: string[] }) {
   if (pendingChannels.length === 0) {
     return (
       <p className="unit-note">
-        Units are assigned from channel config. Shelf, cooling and condenser values
-        are marked as degC.
+        Birimler kanal ayarlarından geliyor. Raf, soğutma ve kondenser değerleri
+        degC olarak işaretlendi.
       </p>
     );
   }
 
   return (
     <p className="unit-note">
-      Units are not present in the CSV. Temperature channels use configured degC;
-      confirm units for {pendingChannels.join(", ")}.
+      CSV içinde birim bilgisi yok. Sıcaklık kanalları degC kabul edildi;
+      {" "}
+      {pendingChannels.join(", ")} kanallarının birimini doğrulamak gerekiyor.
     </p>
   );
 }
@@ -496,17 +497,17 @@ function ChartConfigPanel({
     <div className="chart-config-panel">
       <div className="config-block">
         <div>
-          <strong>Chart layout</strong>
-          <span>Choose overlay or deterministic grouped panels.</span>
+          <strong>Grafik düzeni</strong>
+          <span>Tek grafik veya gruplu paneller arasında seç.</span>
         </div>
-        <div className="segmented-control" role="group" aria-label="Chart layout">
+        <div className="segmented-control" role="group" aria-label="Grafik düzeni">
           <button
             aria-pressed={chartLayout === "overlay"}
             className={chartLayout === "overlay" ? "active" : ""}
             onClick={() => onChartLayoutChange("overlay")}
             type="button"
           >
-            Overlay
+            Tek grafik
           </button>
           <button
             aria-pressed={chartLayout === "grouped"}
@@ -514,15 +515,15 @@ function ChartConfigPanel({
             onClick={() => onChartLayoutChange("grouped")}
             type="button"
           >
-            By group
+            Grupla
           </button>
         </div>
       </div>
 
       <div className="config-block">
         <div>
-          <strong>Analysis functions</strong>
-          <span>Derived signals can be switched independently.</span>
+          <strong>Analiz fonksiyonları</strong>
+          <span>Türetilmiş sinyaller ayrı ayrı açılıp kapatılabilir.</span>
         </div>
         <button
           aria-pressed={analysisFunctions.shelfAverage}
@@ -537,7 +538,7 @@ function ChartConfigPanel({
           type="button"
         >
           <span>Raf Avg</span>
-          <small>Good RAF1-RAF4 values</small>
+          <small>Geçerli RAF1-RAF4 değerleri</small>
         </button>
       </div>
     </div>
@@ -559,16 +560,16 @@ function ChartArea({
 
   return (
     <>
-      <div className="chart-hints" aria-label="Chart interaction hints">
-        <span>Wheel or pinch to zoom</span>
-        <span>Drag to pan</span>
-        <span>{layout === "overlay" ? "Use the slider for range" : "Groups share time source"}</span>
+      <div className="chart-hints" aria-label="Grafik etkileşim ipuçları">
+        <span>Tekerlek veya iki parmakla yakınlaştır</span>
+        <span>Sürükleyerek kaydır</span>
+        <span>{layout === "overlay" ? "Aralık için slider kullan" : "Gruplar aynı zaman eksenini kullanır"}</span>
       </div>
       <Suspense
         fallback={
           <ChartState
-            message="Preparing the chart canvas."
-            title="Loading chart"
+            message="Grafik alanı hazırlanıyor."
+            title="Grafik yükleniyor"
           />
         }
       >
@@ -629,26 +630,26 @@ function ChannelControls({
   return (
     <div className="channel-control-shell">
       <div className="control-heading">
-        <strong>Signals</strong>
+        <strong>Sinyaller</strong>
         <span>
-          {visibleChannels.length} of {channels.length} visible
+          {channels.length} sinyalin {visibleChannels.length} tanesi görünür
         </span>
       </div>
       <div className="channel-quick-actions">
         <button onClick={() => onChange(channels)} type="button">
-          All
+          Tümü
         </button>
         <button onClick={() => chooseGroup("shelf")} type="button">
-          Shelves
+          Raflar
         </button>
         <button onClick={() => chooseGroup("pressure")} type="button">
-          Pressure
+          Basınç
         </button>
         <button onClick={() => chooseGroup("cooling")} type="button">
-          Cooling
+          Soğutma
         </button>
         <button onClick={() => onChange([])} type="button">
-          Clear
+          Temizle
         </button>
       </div>
       <div className="channel-controls">
@@ -657,7 +658,7 @@ function ChannelControls({
           const config = getChannelConfig(channel);
           const secondaryLabel = [
             config.unit,
-            config.derived ? "derived" : null,
+            config.derived ? "türetilmiş" : null,
           ]
             .filter(Boolean)
             .join(" - ");
@@ -708,12 +709,12 @@ function RunActions({ run }: { run: RunSummary | null }) {
   return (
     <div className="run-actions">
       <div className="run-badge">
-        <span>{run?.status ?? "idle"}</span>
-        <strong>{run?.source_kind ?? "No source"}</strong>
+        <span>{run ? runStatusLabel(run.status) : "beklemede"}</span>
+        <strong>{run ? sourceKindLabel(run.source_kind) : "Kaynak yok"}</strong>
       </div>
       {run ? (
         <a className="export-link" href={getRunExportUrl(run.id)}>
-          Export CSV
+          CSV indir
         </a>
       ) : null}
     </div>
@@ -736,22 +737,22 @@ function RunList({
   selectedRunId: number | null;
 }) {
   if (isLoading) {
-    return <p className="empty-state">Loading stored runs...</p>;
+    return <p className="empty-state">Kayıtlı çalışmalar yükleniyor...</p>;
   }
 
   if (error) {
     return (
       <InlineError
-        actionLabel="Retry"
+        actionLabel="Tekrar dene"
         message={error.message}
         onAction={onRetry}
-        title="Runs could not be loaded"
+        title="Çalışmalar yüklenemedi"
       />
     );
   }
 
   if (runs.length === 0) {
-    return <p className="empty-state">No runs stored yet.</p>;
+    return <p className="empty-state">Henüz kayıtlı çalışma yok.</p>;
   }
 
   return (
@@ -766,7 +767,7 @@ function RunList({
           <div>
             <strong>{run.name}</strong>
             <span>
-              {run.row_count} rows, {run.warning_count} warnings
+              {run.row_count} satır, {run.warning_count} uyarı
             </span>
           </div>
           <time>{run.started_at ? formatDate(run.started_at) : "-"}</time>
@@ -795,6 +796,8 @@ function QualitySummary({
     acc[event.event_type] = (acc[event.event_type] ?? 0) + 1;
     return acc;
   }, {});
+  const gapCount = counts.time_gap ?? 0;
+  const suspectCount = counts.suspect_value ?? 0;
   const filteredEvents =
     filter === "all" ? events : events.filter((event) => event.event_type === filter);
   const visibleEvents = filteredEvents.slice(0, 16);
@@ -802,69 +805,83 @@ function QualitySummary({
   return (
     <div className="quality-summary">
       <div className="quality-header">
-        <strong>Quality</strong>
-        <span>{events.length} warnings</span>
+        <div>
+          <strong>Veri kontrolü</strong>
+          <span>{qualitySummaryLabel(events.length)}</span>
+        </div>
       </div>
       <div className="quality-filters">
         <FilterButton
           active={filter === "all"}
           count={events.length}
-          label="All"
+          label="Tümü"
           onClick={() => onFilterChange("all")}
         />
         <FilterButton
           active={filter === "time_gap"}
-          count={counts.time_gap ?? 0}
-          label="Gaps"
+          count={gapCount}
+          label="Kayıt aralığı"
           onClick={() => onFilterChange("time_gap")}
         />
         <FilterButton
           active={filter === "suspect_value"}
-          count={counts.suspect_value ?? 0}
-          label="Suspect"
+          count={suspectCount}
+          label="Şüpheli"
           onClick={() => onFilterChange("suspect_value")}
         />
       </div>
       {isLoading ? (
-        <span>Loading warnings...</span>
+        <span>Uyarılar yükleniyor...</span>
       ) : error ? (
         <InlineError
-          actionLabel="Retry"
+          actionLabel="Tekrar dene"
           message={error.message}
           onAction={onRetry}
-          title="Warnings could not be loaded"
+          title="Uyarılar yüklenemedi"
         />
       ) : events.length === 0 ? (
-        <span>No warnings for selected run.</span>
+        <span className="quality-empty">Seçili çalışmada veri uyarısı yok.</span>
       ) : filteredEvents.length === 0 ? (
-        <span>No warnings in this filter.</span>
+        <span className="quality-empty">Bu filtrede uyarı yok.</span>
       ) : (
-        <dl>
-          {Object.entries(counts).map(([eventType, count]) => (
-            <div key={eventType}>
-              <dt>{eventType}</dt>
-              <dd>{count}</dd>
+        <div className="quality-overview">
+          <strong>{qualityFilterHeadline(filter, filteredEvents.length)}</strong>
+          <span>{qualityFilterDescription(filter, gapCount, suspectCount)}</span>
+          <div className="quality-breakdown" aria-label="Uyarı dağılımı">
+            <div>
+              <span>Kayıt aralığı</span>
+              <strong>{gapCount}</strong>
             </div>
-          ))}
-        </dl>
+            <div>
+              <span>Şüpheli değer</span>
+              <strong>{suspectCount}</strong>
+            </div>
+          </div>
+        </div>
       )}
       {visibleEvents.length > 0 ? (
         <ul className="quality-event-list">
-          {visibleEvents.map((event) => (
-            <li className="quality-event" key={event.id}>
-              <div>
-                <strong>{qualityEventLabel(event.event_type)}</strong>
-                <span>
-                  {event.channel_code ?? "run"} - {qualityEventTimeLabel(event)}
-                </span>
-              </div>
-              <p>{cleanQualityMessage(event.message)}</p>
-            </li>
-          ))}
+          {visibleEvents.map((event) => {
+            const view = qualityEventView(event);
+
+            return (
+              <li className="quality-event" key={event.id}>
+                <div className="quality-event-top">
+                  <strong>{view.title}</strong>
+                  <span>{view.location}</span>
+                </div>
+                <p>{view.detail}</p>
+                <div className="quality-event-meta">
+                  <span>{view.time}</span>
+                  <span>{view.effect}</span>
+                </div>
+              </li>
+            );
+          })}
         </ul>
       ) : null}
       {filteredEvents.length > visibleEvents.length ? (
-        <span>{filteredEvents.length - visibleEvents.length} more warnings hidden.</span>
+        <span>{filteredEvents.length - visibleEvents.length} uyarı daha gizli.</span>
       ) : null}
     </div>
   );
@@ -991,12 +1008,12 @@ function chartGroupsFor(channels: string[]) {
 }
 
 function signalCountLabel(count: number): string {
-  return count === 1 ? "1 signal" : `${count} signals`;
+  return `${count} sinyal`;
 }
 
 function runRangeLabel(run: RunSummary | null): string {
   if (!run?.started_at || !run.finished_at) {
-    return "Import a run to inspect its samples.";
+    return "Örnekleri incelemek için bir çalışma içe aktar.";
   }
 
   return `${formatDate(run.started_at)} - ${formatDate(run.finished_at)}`;
@@ -1019,10 +1036,10 @@ function durationLabel(run: RunSummary | null): string {
   const minutes = totalMinutes % 60;
 
   if (hours === 0) {
-    return `${minutes}m`;
+    return `${minutes} dk`;
   }
 
-  return `${hours}h ${minutes}m`;
+  return `${hours} sa ${minutes} dk`;
 }
 
 function shortDate(value: string | null | undefined): string {
@@ -1033,34 +1050,207 @@ function shortDate(value: string | null | undefined): string {
   return formatDate(value);
 }
 
-function qualityEventLabel(eventType: string): string {
-  if (eventType === "time_gap") {
-    return "Time gap";
-  }
-
-  if (eventType === "suspect_value") {
-    return "Suspect value";
-  }
-
-  return eventType;
+function formatDate(value: string): string {
+  return new Intl.DateTimeFormat("tr-TR", {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(new Date(value));
 }
 
-function qualityEventTimeLabel(event: QualityEvent): string {
-  const rowLabel =
-    event.source_row_number !== null ? `row ${event.source_row_number}` : null;
-  const timeLabel =
-    event.source_timestamp_text ?? (event.sampled_at ? formatDate(event.sampled_at) : null);
+function runStatusLabel(status: string): string {
+  if (status === "imported") {
+    return "içe aktarıldı";
+  }
 
-  return [timeLabel, rowLabel].filter(Boolean).join(" - ") || "no timestamp";
+  return status;
+}
+
+function sourceKindLabel(sourceKind: string): string {
+  if (sourceKind === "csv_import") {
+    return "CSV içe aktarma";
+  }
+
+  return sourceKind;
+}
+
+function qualitySummaryLabel(count: number): string {
+  if (count === 0) {
+    return "Uyarı yok";
+  }
+
+  return `${count} uyarı incelenmeli`;
+}
+
+function qualityFilterHeadline(filter: QualityFilter, count: number): string {
+  if (filter === "time_gap") {
+    return `${count} kayıt aralığı uyarısı`;
+  }
+
+  if (filter === "suspect_value") {
+    return `${count} şüpheli değer uyarısı`;
+  }
+
+  return `${count} toplam uyarı`;
+}
+
+function qualityFilterDescription(
+  filter: QualityFilter,
+  gapCount: number,
+  suspectCount: number,
+): string {
+  if (filter === "time_gap") {
+    return "Kayıtlar arasında beklenenden uzun boşluk olan noktalar. Grafik bu noktalarda veri sürekliliğini koparır.";
+  }
+
+  if (filter === "suspect_value") {
+    return "Cihazdan gelen fakat normal ölçüm gibi kabul edilmeyen değerler. Raf ortalaması gibi analizlere dahil edilmez.";
+  }
+
+  return `${gapCount} zaman boşluğu ve ${suspectCount} şüpheli değer bulundu. Bu liste veriyi yorumlarken dikkat edilmesi gereken noktaları gösterir.`;
+}
+
+function qualityEventView(event: QualityEvent): {
+  detail: string;
+  effect: string;
+  location: string;
+  time: string;
+  title: string;
+} {
+  const metadata = parseQualityMetadata(event.metadata_json);
+  const location = event.source_row_number !== null ? `Satır ${event.source_row_number}` : "Satır yok";
+  const time = qualityEventDisplayTime(event);
+
+  if (event.event_type === "time_gap") {
+    const gapSeconds = qualityGapSeconds(event, metadata);
+    const previousTimestamp = stringFromMetadata(metadata, "previous_timestamp");
+    const previousLabel = previousTimestamp
+      ? `Önceki örnek: ${formatMachineTimestamp(previousTimestamp)}`
+      : "Önceki örnek bilinmiyor";
+
+    return {
+      title: "Kayıt aralığı uzun",
+      location,
+      time,
+      detail: gapSeconds !== null
+        ? `Bu noktadan önce ${formatSeconds(gapSeconds)} boyunca yeni örnek yok.`
+        : "Bu noktadan önce beklenenden uzun bir kayıt boşluğu var.",
+      effect: `${previousLabel}; grafik çizgisi burada koparılır.`,
+    };
+  }
+
+  if (event.event_type === "suspect_value") {
+    const channelLabel = event.channel_code
+      ? getChannelConfig(event.channel_code).label
+      : "Kanal";
+    const rawValue =
+      stringFromMetadata(metadata, "raw_text") ??
+      suspectValueFromMessage(event.message) ??
+      numberFromMetadata(metadata, "raw_value")?.toString() ??
+      "bilinmeyen değer";
+
+    return {
+      title: "Şüpheli değer",
+      location: event.channel_code ? `${channelLabel} - ${location}` : location,
+      time,
+      detail: `${channelLabel} ${rawValue} değeri gönderdi. Bu değer cihazın özel hata değeri gibi işaretlendi.`,
+      effect: event.channel_code?.startsWith("RAF")
+        ? "Normal çizgiye ve Raf Avg hesabına dahil edilmez."
+        : "Normal ölçüm gibi yorumlanmamalıdır.",
+    };
+  }
+
+  return {
+    title: "Veri uyarısı",
+    location,
+    time,
+    detail: cleanQualityMessage(event.message),
+    effect: "Bu noktayı yorumlarken ham logu kontrol et.",
+  };
+}
+
+function qualityEventDisplayTime(event: QualityEvent): string {
+  if (event.source_timestamp_text) {
+    return formatMachineTimestamp(event.source_timestamp_text);
+  }
+
+  if (event.sampled_at) {
+    return formatDate(event.sampled_at);
+  }
+
+  return "Zaman yok";
+}
+
+function parseQualityMetadata(metadataJson: string | null): Record<string, unknown> {
+  if (!metadataJson) {
+    return {};
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(metadataJson);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function qualityGapSeconds(
+  event: QualityEvent,
+  metadata: Record<string, unknown>,
+): number | null {
+  const metadataValue = numberFromMetadata(metadata, "gap_seconds");
+
+  if (metadataValue !== null) {
+    return metadataValue;
+  }
+
+  const match = event.message.match(/time gap of ([\d.]+) seconds/);
+  return match ? Number(match[1]) : null;
+}
+
+function numberFromMetadata(
+  metadata: Record<string, unknown>,
+  key: string,
+): number | null {
+  const value = metadata[key];
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  return null;
+}
+
+function stringFromMetadata(
+  metadata: Record<string, unknown>,
+  key: string,
+): string | null {
+  const value = metadata[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function suspectValueFromMessage(message: string): string | null {
+  const match = message.match(/value ([^\s]+)/);
+  return match ? match[1] : null;
 }
 
 function cleanQualityMessage(message: string): string {
   return message.replaceAll("`", "");
 }
 
-function formatDate(value: string): string {
-  return new Intl.DateTimeFormat("tr-TR", {
-    dateStyle: "short",
-    timeStyle: "short",
-  }).format(new Date(value));
+function formatSeconds(value: number): string {
+  return `${new Intl.NumberFormat("tr-TR", {
+    maximumFractionDigits: 3,
+  }).format(value)} sn`;
+}
+
+function formatMachineTimestamp(value: string): string {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})[T-](.+?)(?:Z)?$/);
+
+  if (!match) {
+    return value;
+  }
+
+  return `${match[3]}.${match[2]}.${match[1]} ${match[4]}`;
 }

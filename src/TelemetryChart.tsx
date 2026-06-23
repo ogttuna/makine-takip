@@ -294,7 +294,7 @@ function buildSeries(
         suspectData.push({
           value: [timestamp, markerValue ?? measurement.numeric_value],
           rawText: measurement.raw_text,
-          displayValue: `${measurement.raw_text} suspect`,
+          displayValue: `${measurement.raw_text} şüpheli`,
         });
         continue;
       }
@@ -326,7 +326,7 @@ function buildSeries(
 
     if (suspectData.length > 0) {
       result.push({
-        name: `${seriesName(config)} suspect`,
+        name: `${seriesName(config)} şüpheli`,
         type: "scatter",
         yAxisIndex: axisIndexFor(axisLayout, config.axis),
         symbol: "diamond",
@@ -339,7 +339,7 @@ function buildSeries(
           disabled: true,
         },
         tooltip: {
-          valueFormatter: (_value) => "suspect",
+          valueFormatter: (_value) => "şüpheli",
         },
       });
     }
@@ -360,7 +360,7 @@ function buildAxisLayout(channels: string[]): AxisLayout {
     indexByKind.main = yAxis.length;
     yAxis.push({
       type: "value",
-      name: "Value",
+      name: "Değer",
       position: "left",
       axisLabel: {
         color: "#607089",
