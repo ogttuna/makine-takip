@@ -1,10 +1,12 @@
 use axum::extract::{Multipart, Path, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use serde::Serialize;
 use sqlx::{FromRow, Row, SqlitePool};
+use tower_http::services::{ServeDir, ServeFile};
 
 use crate::csv_import::{ImportReport, import_csv_bytes};
 
@@ -104,6 +106,7 @@ struct SampleMeasurementRow {
 
 pub fn router(pool: SqlitePool) -> Router {
     let state = AppState { pool };
+    let static_files = ServeDir::new("dist").fallback(ServeFile::new("dist/index.html"));
 
     Router::new()
         .route("/api/health", get(health))
@@ -114,6 +117,8 @@ pub fn router(pool: SqlitePool) -> Router {
         .route("/api/runs/{id}", get(run_detail))
         .route("/api/runs/{id}/samples", get(run_samples))
         .route("/api/runs/{id}/quality-events", get(run_quality_events))
+        .route("/api/runs/{id}/export.csv", get(export_run_csv))
+        .fallback_service(static_files)
         .with_state(state)
 }
 
@@ -362,6 +367,165 @@ async fn run_quality_events(
     .await?;
 
     Ok(Json(QualityEventsResponse { events }))
+}
+
+async fn export_run_csv(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, ApiError> {
+    let run = fetch_run_summary(&state.pool, id).await?;
+    let rows = sqlx::query_as::<_, SampleMeasurementRow>(
+        r#"
+        SELECT
+            f.id AS frame_id,
+            f.sampled_at,
+            f.source_timestamp_text,
+            f.source_row_number,
+            c.code AS channel_code,
+            m.raw_text,
+            m.numeric_value,
+            m.value_text,
+            m.value_type,
+            m.quality,
+            m.quality_reason
+        FROM sample_frames f
+        JOIN measurements m ON m.frame_id = f.id
+        JOIN channels c ON c.id = m.channel_id
+        WHERE f.run_id = ?1
+        ORDER BY f.source_row_number ASC, c.id ASC
+        "#,
+    )
+    .bind(id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    if rows.is_empty() {
+        return Err(ApiError::not_found(anyhow::anyhow!(
+            "run {id} does not contain samples"
+        )));
+    }
+
+    let mut channels = Vec::<String>::new();
+    let mut frames = Vec::<ExportFrame>::new();
+
+    for row in rows {
+        if !channels.contains(&row.channel_code) {
+            channels.push(row.channel_code.clone());
+        }
+
+        if frames
+            .last()
+            .map(|frame| frame.id != row.frame_id)
+            .unwrap_or(true)
+        {
+            frames.push(ExportFrame {
+                id: row.frame_id,
+                source_timestamp_text: row.source_timestamp_text.clone(),
+                values: Vec::new(),
+            });
+        }
+
+        frames
+            .last_mut()
+            .expect("export frame was just inserted")
+            .values
+            .push((row.channel_code, row.raw_text));
+    }
+
+    let mut writer = csv::WriterBuilder::new()
+        .delimiter(b';')
+        .from_writer(Vec::new());
+    let mut header_row = Vec::with_capacity(channels.len() + 1);
+    header_row.push("TARIH SAAT".to_string());
+    header_row.extend(channels.iter().cloned());
+    writer.write_record(&header_row)?;
+
+    for frame in frames {
+        let mut row = Vec::with_capacity(channels.len() + 1);
+        row.push(frame.source_timestamp_text);
+
+        for channel in &channels {
+            let value = frame
+                .values
+                .iter()
+                .find(|(code, _)| code == channel)
+                .map(|(_, value)| value.as_str())
+                .unwrap_or_default();
+            row.push(value.to_string());
+        }
+
+        writer.write_record(&row)?;
+    }
+
+    let csv_bytes = writer.into_inner()?;
+    let file_name = export_file_name(&run.name);
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{file_name}\""),
+            ),
+        ],
+        csv_bytes,
+    )
+        .into_response())
+}
+
+async fn fetch_run_summary(pool: &SqlitePool, id: i64) -> Result<RunSummary, ApiError> {
+    let Some(run) = sqlx::query_as::<_, RunSummary>(
+        r#"
+        SELECT
+            r.id,
+            r.name,
+            r.source_kind,
+            r.source_name,
+            r.started_at,
+            r.finished_at,
+            r.status,
+            COALESCE(i.row_count, 0) AS row_count,
+            COALESCE(i.warning_count, 0) AS warning_count,
+            COALESCE(i.error_count, 0) AS error_count
+        FROM runs r
+        LEFT JOIN import_files i ON i.run_id = r.id
+        WHERE r.id = ?1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    else {
+        return Err(ApiError::not_found(anyhow::anyhow!(
+            "run {id} was not found"
+        )));
+    };
+
+    Ok(run)
+}
+
+#[derive(Debug)]
+struct ExportFrame {
+    id: i64,
+    source_timestamp_text: String,
+    values: Vec<(String, String)>,
+}
+
+fn export_file_name(run_name: &str) -> String {
+    let stem = run_name
+        .strip_suffix(".csv")
+        .unwrap_or(run_name)
+        .chars()
+        .map(|char| {
+            if char.is_ascii_alphanumeric() || matches!(char, '-' | '_') {
+                char
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+
+    format!("{stem}_export.csv")
 }
 
 #[derive(Debug)]

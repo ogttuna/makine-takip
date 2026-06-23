@@ -6,6 +6,7 @@ import {
   fetchRunSamples,
   fetchRuns,
   getCollectorUrl,
+  getRunExportUrl,
   uploadCsv,
 } from "./api";
 import type { ImportReport, QualityEvent, RunSummary, SampleFrame } from "./api";
@@ -117,7 +118,7 @@ export function App() {
               <h2>{selectedRun?.name ?? "No run selected"}</h2>
               <p>{runRangeLabel(selectedRun)}</p>
             </div>
-            <RunBadge run={selectedRun} />
+            <RunActions run={selectedRun} />
           </div>
 
           <ChannelControls
@@ -285,11 +286,18 @@ function Metric({
   );
 }
 
-function RunBadge({ run }: { run: RunSummary | null }) {
+function RunActions({ run }: { run: RunSummary | null }) {
   return (
-    <div className="run-badge">
-      <span>{run?.status ?? "idle"}</span>
-      <strong>{run?.source_kind ?? "No source"}</strong>
+    <div className="run-actions">
+      <div className="run-badge">
+        <span>{run?.status ?? "idle"}</span>
+        <strong>{run?.source_kind ?? "No source"}</strong>
+      </div>
+      {run ? (
+        <a className="export-link" href={getRunExportUrl(run.id)}>
+          Export CSV
+        </a>
+      ) : null}
     </div>
   );
 }

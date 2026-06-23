@@ -91,6 +91,15 @@ npm run dev
 Tarayicida `http://127.0.0.1:5173` acilir. Collector varsayilan olarak
 `http://127.0.0.1:4777` adresinde calisir.
 
+Vite olmadan lokal production modda calistir:
+
+```sh
+npm run local:serve
+```
+
+Bu komut frontend'i `dist/` altina build eder ve collector UI ile API'yi
+`http://127.0.0.1:4777` uzerinden birlikte serve eder.
+
 Tauri masaustu kabugunu calistirmak icin:
 
 ```sh
@@ -104,6 +113,7 @@ npm run tauri:dev
 - `npm run preview`: Vite build onizleme
 - `npm run collector:dev`: Rust collector API
 - `npm run collector:check`: Collector crate derleme kontrolu
+- `npm run local:serve`: Frontend build + collector static serve
 - `npm run tauri:dev`: Tauri 2 masaustu uygulamasi
 - `npm run check`: Frontend build ve collector check
 

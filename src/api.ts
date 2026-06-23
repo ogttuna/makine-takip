@@ -129,3 +129,7 @@ export async function fetchQualityEvents(runId: number): Promise<QualityEvent[]>
 export function getCollectorUrl(): string {
   return apiBaseUrl;
 }
+
+export function getRunExportUrl(runId: number): string {
+  return `${apiBaseUrl}/api/runs/${runId}/export.csv`;
+}

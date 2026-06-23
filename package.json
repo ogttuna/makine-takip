@@ -11,6 +11,7 @@
     "tauri:dev": "tauri dev",
     "collector:dev": "cargo run -p collector",
     "collector:check": "cargo check -p collector",
+    "local:serve": "npm run build && cargo run -p collector",
     "check": "npm run build && cargo check -p collector"
   },
   "dependencies": {
