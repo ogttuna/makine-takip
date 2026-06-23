@@ -50,3 +50,6 @@ venv/
 exports/
 *.parquet
 *.duckdb
+
+# Local machine logs
+LogFile_*.csv
