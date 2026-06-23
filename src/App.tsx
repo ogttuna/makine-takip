@@ -10,6 +10,7 @@ import {
   uploadCsv,
 } from "./api";
 import type { ImportReport, QualityEvent, RunSummary, SampleFrame } from "./api";
+import type { ChannelGroup } from "./channelConfig";
 import {
   getChannelConfig,
   SHELF_AVERAGE_CHANNEL,
@@ -18,6 +19,27 @@ import {
 } from "./channelConfig";
 
 type QualityFilter = "all" | "time_gap" | "suspect_value";
+type ChartLayout = "overlay" | "grouped";
+
+type AnalysisFunctions = {
+  shelfAverage: boolean;
+};
+
+const DEFAULT_ANALYSIS_FUNCTIONS: AnalysisFunctions = {
+  shelfAverage: true,
+};
+
+const CHART_GROUPS: Array<{
+  group: ChannelGroup;
+  title: string;
+  note: string;
+}> = [
+  { group: "shelf", title: "Shelves", note: "Shelf probes and optional functions" },
+  { group: "pressure", title: "Pressure", note: "Low and high pressure channels" },
+  { group: "vacuum", title: "Vacuum", note: "Log scale vacuum channel" },
+  { group: "cooling", title: "Cooling", note: "Cooling and condenser channels" },
+  { group: "other", title: "Other", note: "Unmapped imported signals" },
+];
 
 const TelemetryChart = lazy(() =>
   import("./TelemetryChart").then((module) => ({ default: module.TelemetryChart })),
@@ -26,6 +48,10 @@ const TelemetryChart = lazy(() =>
 export function App() {
   const queryClient = useQueryClient();
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
+  const [chartLayout, setChartLayout] = useState<ChartLayout>("overlay");
+  const [analysisFunctions, setAnalysisFunctions] = useState<AnalysisFunctions>(
+    DEFAULT_ANALYSIS_FUNCTIONS,
+  );
   const [visibleChannels, setVisibleChannels] = useState<string[]>([]);
   const [qualityFilter, setQualityFilter] = useState<QualityFilter>("all");
   const [lastImportReport, setLastImportReport] = useState<ImportReport | null>(null);
@@ -64,9 +90,10 @@ export function App() {
   const qualityEvents = qualityEventsQuery.data ?? [];
   const rawChannelCodes = useMemo(() => getRawChannelCodes(samples), [samples]);
   const channelCodes = useMemo(
-    () => withDerivedChannels(rawChannelCodes),
-    [rawChannelCodes],
+    () => withDerivedChannels(rawChannelCodes, analysisFunctions),
+    [analysisFunctions, rawChannelCodes],
   );
+  const shelfAverageAvailable = hasShelfAverageInputs(rawChannelCodes);
   const derivedChannelCount = channelCodes.length - rawChannelCodes.length;
   const pendingUnitChannels = rawChannelCodes.filter(
     (channel) => !getChannelConfig(channel).unit,
@@ -211,6 +238,14 @@ export function App() {
           />
           <UnitNote pendingChannels={pendingUnitChannels} />
 
+          <ChartConfigPanel
+            analysisFunctions={analysisFunctions}
+            chartLayout={chartLayout}
+            onAnalysisFunctionsChange={setAnalysisFunctions}
+            onChartLayoutChange={setChartLayout}
+            shelfAverageAvailable={shelfAverageAvailable}
+          />
+
           <ChannelControls
             channels={channelCodes}
             visibleChannels={activeVisibleChannels}
@@ -241,27 +276,12 @@ export function App() {
               title="No channels selected"
             />
           ) : (
-            <>
-              <div className="chart-hints" aria-label="Chart interaction hints">
-                <span>Wheel or pinch to zoom</span>
-                <span>Drag to pan</span>
-                <span>Use the slider for range</span>
-              </div>
-              <Suspense
-                fallback={
-                  <ChartState
-                    message="Preparing the chart canvas."
-                    title="Loading chart"
-                  />
-                }
-              >
-                <TelemetryChart
-                  qualityEvents={qualityEvents}
-                  samples={samples}
-                  visibleChannels={activeVisibleChannels}
-                />
-              </Suspense>
-            </>
+            <ChartArea
+              layout={chartLayout}
+              qualityEvents={qualityEvents}
+              samples={samples}
+              visibleChannels={activeVisibleChannels}
+            />
           )}
         </div>
 
@@ -456,6 +476,132 @@ function UnitNote({ pendingChannels }: { pendingChannels: string[] }) {
       Units are not present in the CSV. Temperature channels use configured degC;
       confirm units for {pendingChannels.join(", ")}.
     </p>
+  );
+}
+
+function ChartConfigPanel({
+  analysisFunctions,
+  chartLayout,
+  onAnalysisFunctionsChange,
+  onChartLayoutChange,
+  shelfAverageAvailable,
+}: {
+  analysisFunctions: AnalysisFunctions;
+  chartLayout: ChartLayout;
+  onAnalysisFunctionsChange: (functions: AnalysisFunctions) => void;
+  onChartLayoutChange: (layout: ChartLayout) => void;
+  shelfAverageAvailable: boolean;
+}) {
+  return (
+    <div className="chart-config-panel">
+      <div className="config-block">
+        <div>
+          <strong>Chart layout</strong>
+          <span>Choose overlay or deterministic grouped panels.</span>
+        </div>
+        <div className="segmented-control" role="group" aria-label="Chart layout">
+          <button
+            aria-pressed={chartLayout === "overlay"}
+            className={chartLayout === "overlay" ? "active" : ""}
+            onClick={() => onChartLayoutChange("overlay")}
+            type="button"
+          >
+            Overlay
+          </button>
+          <button
+            aria-pressed={chartLayout === "grouped"}
+            className={chartLayout === "grouped" ? "active" : ""}
+            onClick={() => onChartLayoutChange("grouped")}
+            type="button"
+          >
+            By group
+          </button>
+        </div>
+      </div>
+
+      <div className="config-block">
+        <div>
+          <strong>Analysis functions</strong>
+          <span>Derived signals can be switched independently.</span>
+        </div>
+        <button
+          aria-pressed={analysisFunctions.shelfAverage}
+          className={analysisFunctions.shelfAverage ? "function-toggle active" : "function-toggle"}
+          disabled={!shelfAverageAvailable}
+          onClick={() =>
+            onAnalysisFunctionsChange({
+              ...analysisFunctions,
+              shelfAverage: !analysisFunctions.shelfAverage,
+            })
+          }
+          type="button"
+        >
+          <span>Raf Avg</span>
+          <small>Good RAF1-RAF4 values</small>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ChartArea({
+  layout,
+  qualityEvents,
+  samples,
+  visibleChannels,
+}: {
+  layout: ChartLayout;
+  qualityEvents: QualityEvent[];
+  samples: SampleFrame[];
+  visibleChannels: string[];
+}) {
+  const groupedCharts = chartGroupsFor(visibleChannels);
+
+  return (
+    <>
+      <div className="chart-hints" aria-label="Chart interaction hints">
+        <span>Wheel or pinch to zoom</span>
+        <span>Drag to pan</span>
+        <span>{layout === "overlay" ? "Use the slider for range" : "Groups share time source"}</span>
+      </div>
+      <Suspense
+        fallback={
+          <ChartState
+            message="Preparing the chart canvas."
+            title="Loading chart"
+          />
+        }
+      >
+        {layout === "overlay" ? (
+          <TelemetryChart
+            qualityEvents={qualityEvents}
+            samples={samples}
+            visibleChannels={visibleChannels}
+          />
+        ) : (
+          <div className="chart-grid">
+            {groupedCharts.map((chart) => (
+              <section className="chart-tile" key={chart.group}>
+                <div className="chart-tile-heading">
+                  <div>
+                    <strong>{chart.title}</strong>
+                    <span>{chart.note}</span>
+                  </div>
+                  <small>{signalCountLabel(chart.channels.length)}</small>
+                </div>
+                <TelemetryChart
+                  qualityEvents={qualityEvents}
+                  samples={samples}
+                  showSlider={false}
+                  variant="compact"
+                  visibleChannels={chart.channels}
+                />
+              </section>
+            ))}
+          </div>
+        )}
+      </Suspense>
+    </>
   );
 }
 
@@ -811,16 +957,41 @@ function getRawChannelCodes(samples: SampleFrame[]): string[] {
   return sortChannels([...channels]);
 }
 
-function withDerivedChannels(channels: string[]): string[] {
+function hasShelfAverageInputs(channels: string[]): boolean {
   const shelfChannelCount = SHELF_CHANNELS.filter((channel) =>
     channels.includes(channel),
   ).length;
 
-  if (shelfChannelCount < 2 || channels.includes(SHELF_AVERAGE_CHANNEL)) {
+  return shelfChannelCount >= 2;
+}
+
+function withDerivedChannels(
+  channels: string[],
+  analysisFunctions: AnalysisFunctions,
+): string[] {
+  const shelfAverageEnabled =
+    analysisFunctions.shelfAverage && hasShelfAverageInputs(channels);
+
+  if (!shelfAverageEnabled || channels.includes(SHELF_AVERAGE_CHANNEL)) {
     return sortChannels(channels);
   }
 
   return sortChannels([...channels, SHELF_AVERAGE_CHANNEL]);
+}
+
+function chartGroupsFor(channels: string[]) {
+  return CHART_GROUPS.map((groupConfig) => ({
+    ...groupConfig,
+    channels: sortChannels(
+      channels.filter(
+        (channel) => getChannelConfig(channel).group === groupConfig.group,
+      ),
+    ),
+  })).filter((groupConfig) => groupConfig.channels.length > 0);
+}
+
+function signalCountLabel(count: number): string {
+  return count === 1 ? "1 signal" : `${count} signals`;
 }
 
 function runRangeLabel(run: RunSummary | null): string {

@@ -10,6 +10,7 @@ import {
   type TooltipComponentOption,
 } from "echarts/components";
 import * as echarts from "echarts/core";
+import type { YAXisComponentOption } from "echarts";
 import type { ComposeOption, EChartsType } from "echarts/core";
 import { CanvasRenderer } from "echarts/renderers";
 import { useEffect, useMemo, useRef } from "react";
@@ -26,6 +27,8 @@ type TelemetryChartProps = {
   samples: SampleFrame[];
   qualityEvents: QualityEvent[];
   visibleChannels: string[];
+  variant?: "large" | "compact";
+  showSlider?: boolean;
 };
 
 type TelemetryChartOption = ComposeOption<
@@ -36,6 +39,13 @@ type TelemetryChartOption = ComposeOption<
   | ScatterSeriesOption
   | TooltipComponentOption
 >;
+
+type AxisKind = "main" | "vacuum";
+
+type AxisLayout = {
+  indexByKind: Partial<Record<AxisKind, number>>;
+  yAxis: YAXisComponentOption[];
+};
 
 echarts.use([
   CanvasRenderer,
@@ -50,7 +60,9 @@ echarts.use([
 export function TelemetryChart({
   samples,
   qualityEvents,
+  showSlider = true,
   visibleChannels,
+  variant = "large",
 }: TelemetryChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<EChartsType | null>(null);
@@ -85,13 +97,46 @@ export function TelemetryChart({
       return;
     }
 
+    const compact = variant === "compact";
+    const dataZoom: DataZoomComponentOption[] = [
+      {
+        type: "inside",
+        throttle: 80,
+      },
+    ];
+
+    if (showSlider) {
+      dataZoom.push({
+        type: "slider",
+        bottom: compact ? 10 : 18,
+        height: compact ? 18 : 24,
+        borderColor: "#c7d0db",
+        brushSelect: false,
+        fillerColor: "rgba(0, 125, 121, 0.14)",
+        handleSize: compact ? 12 : 16,
+        moveHandleSize: 6,
+        selectedDataBackground: {
+          lineStyle: {
+            color: "#007d79",
+          },
+          areaStyle: {
+            color: "rgba(0, 125, 121, 0.08)",
+          },
+        },
+        textStyle: {
+          color: "#607089",
+        },
+        throttle: 80,
+      });
+    }
+
     const option: TelemetryChartOption = {
       animation: false,
       color: series.colors,
       grid: {
-        top: 86,
-        right: 76,
-        bottom: 78,
+        top: compact ? 58 : 86,
+        right: compact ? 62 : 76,
+        bottom: showSlider ? (compact ? 42 : 78) : 38,
         left: 58,
       },
       legend: {
@@ -99,10 +144,11 @@ export function TelemetryChart({
         top: 0,
         left: 56,
         right: 56,
-        height: 56,
+        height: compact ? 36 : 56,
         textStyle: {
-          color: "#3f4754",
+          color: "#334155",
           fontFamily: "Inter, system-ui, sans-serif",
+          fontSize: compact ? 11 : 12,
         },
       },
       tooltip: {
@@ -112,7 +158,7 @@ export function TelemetryChart({
           animation: false,
           type: "line",
           lineStyle: {
-            color: "#94a3b8",
+            color: "#8b9aad",
             type: "dashed",
             width: 1,
           },
@@ -120,87 +166,46 @@ export function TelemetryChart({
         valueFormatter: (value) =>
           typeof value === "number" ? value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "") : String(value),
       },
-      dataZoom: [
-        {
-          type: "inside",
-          throttle: 80,
-        },
-        {
-          type: "slider",
-          bottom: 18,
-          height: 24,
-          borderColor: "#d7dde8",
-          brushSelect: false,
-          fillerColor: "rgba(8, 145, 178, 0.14)",
-          handleSize: 16,
-          moveHandleSize: 6,
-          selectedDataBackground: {
-            lineStyle: {
-              color: "#0891b2",
-            },
-            areaStyle: {
-              color: "rgba(8, 145, 178, 0.08)",
-            },
-          },
-          textStyle: {
-            color: "#667085",
-          },
-          throttle: 80,
-        },
-      ],
+      dataZoom,
       xAxis: {
         type: "time",
         axisLabel: {
-          color: "#667085",
+          color: "#607089",
           formatter: formatAxisTime,
           hideOverlap: true,
         },
         axisLine: {
           lineStyle: {
-            color: "#cbd5e1",
+            color: "#c7d0db",
           },
         },
       },
-      yAxis: [
-        {
-          type: "value",
-          name: "Value",
-          axisLabel: {
-            color: "#667085",
-          },
-          splitLine: {
-            lineStyle: {
-              color: "#e5e7eb",
-            },
-          },
-        },
-        {
-          type: "log",
-          name: "Vacum",
-          min: 0.000_001,
-          axisLabel: {
-            color: "#667085",
-          },
-          splitLine: {
-            show: false,
-          },
-        },
-      ],
+      yAxis: series.yAxis,
       series: series.series,
     };
 
     chartRef.current.setOption(option, true);
-  }, [series]);
+  }, [series, showSlider, variant]);
 
-  return <div className="telemetry-chart" ref={containerRef} />;
+  return (
+    <div
+      className={variant === "compact" ? "telemetry-chart compact" : "telemetry-chart"}
+      ref={containerRef}
+    />
+  );
 }
 
 function buildSeries(
   samples: SampleFrame[],
   qualityEvents: QualityEvent[],
   visibleChannels: string[],
-): { colors: string[]; series: Array<LineSeriesOption | ScatterSeriesOption> } {
+): {
+  colors: string[];
+  series: Array<LineSeriesOption | ScatterSeriesOption>;
+  yAxis: YAXisComponentOption[];
+} {
   const channels = sortChannels(visibleChannels);
+  const axisLayout = buildAxisLayout(channels);
   const colors = channels.map((channel) => getChannelConfig(channel).color);
   const eventByFrameChannel = new Set(
     qualityEvents
@@ -216,7 +221,7 @@ function buildSeries(
       result.push({
         name: seriesName(config),
         type: "line",
-        yAxisIndex: 0,
+        yAxisIndex: axisIndexFor(axisLayout, config.axis),
         showSymbol: false,
         smooth: 0.15,
         connectNulls: false,
@@ -284,7 +289,7 @@ function buildSeries(
     result.push({
       name: seriesName(config),
       type: "line",
-      yAxisIndex: config.axis === "vacuum" ? 1 : 0,
+      yAxisIndex: axisIndexFor(axisLayout, config.axis),
       showSymbol: false,
       smooth: 0.15,
       connectNulls: false,
@@ -304,7 +309,7 @@ function buildSeries(
       result.push({
         name: `${seriesName(config)} suspect`,
         type: "scatter",
-        yAxisIndex: config.axis === "vacuum" ? 1 : 0,
+        yAxisIndex: axisIndexFor(axisLayout, config.axis),
         symbol: "diamond",
         symbolSize: 10,
         data: suspectData,
@@ -321,7 +326,58 @@ function buildSeries(
     }
   }
 
-  return { colors, series: result };
+  return { colors, series: result, yAxis: axisLayout.yAxis };
+}
+
+function buildAxisLayout(channels: string[]): AxisLayout {
+  const axisKinds = new Set<AxisKind>(
+    channels.map((channel) => getChannelConfig(channel).axis),
+  );
+  const yAxis: YAXisComponentOption[] = [];
+  const indexByKind: Partial<Record<AxisKind, number>> = {};
+  const includeMainAxis = axisKinds.has("main") || axisKinds.size === 0;
+
+  if (includeMainAxis) {
+    indexByKind.main = yAxis.length;
+    yAxis.push({
+      type: "value",
+      name: "Value",
+      position: "left",
+      axisLabel: {
+        color: "#607089",
+      },
+      splitLine: {
+        lineStyle: {
+          color: "#dde4ec",
+        },
+      },
+    });
+  }
+
+  if (axisKinds.has("vacuum")) {
+    indexByKind.vacuum = yAxis.length;
+    yAxis.push({
+      type: "log",
+      name: "Vacum",
+      min: 0.000_001,
+      position: includeMainAxis ? "right" : "left",
+      axisLabel: {
+        color: "#607089",
+      },
+      splitLine: {
+        show: !includeMainAxis,
+        lineStyle: {
+          color: "#dde4ec",
+        },
+      },
+    });
+  }
+
+  return { indexByKind, yAxis };
+}
+
+function axisIndexFor(axisLayout: AxisLayout, axis: AxisKind): number {
+  return axisLayout.indexByKind[axis] ?? axisLayout.indexByKind.main ?? 0;
 }
 
 function seriesName(config: ReturnType<typeof getChannelConfig>): string {

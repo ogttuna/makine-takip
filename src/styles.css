@@ -1,9 +1,10 @@
 :root {
-  color: #172033;
-  background: #f4f7fb;
+  color: #1f2933;
+  background: #eef2f6;
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
+  font-variant-numeric: tabular-nums;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -122,11 +123,11 @@ h2 {
   justify-content: space-between;
   gap: 12px;
   min-width: 360px;
-  border: 1px solid #d7dde8;
+  border: 1px solid #c7d0db;
   border-radius: 8px;
-  background: #ffffff;
+  background: #fbfdff;
   padding: 12px 14px;
-  box-shadow: 0 12px 28px rgba(25, 38, 62, 0.08);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
 }
 
 .connection-state {
@@ -169,7 +170,7 @@ h2 {
 .ghost-button {
   min-height: 34px;
   flex: 0 0 auto;
-  border: 1px solid #d7dde8;
+  border: 1px solid #c7d0db;
   border-radius: 6px;
   background: #ffffff;
   color: #334155;
@@ -182,8 +183,8 @@ h2 {
 .channel-quick-actions button:hover,
 .export-link:hover,
 .filter-button:hover {
-  border-color: #0891b2;
-  color: #0e7490;
+  border-color: #007d79;
+  color: #005d5d;
 }
 
 .ghost-button:disabled {
@@ -207,9 +208,9 @@ h2 {
   display: grid;
   gap: 8px;
   min-height: 92px;
-  border: 1px solid #d7dde8;
+  border: 1px solid #c7d0db;
   border-radius: 8px;
-  background: #ffffff;
+  background: #fbfdff;
   padding: 16px;
 }
 
@@ -248,10 +249,10 @@ h2 {
 
 .chart-panel,
 .side-panel {
-  border: 1px solid #d7dde8;
+  border: 1px solid #c7d0db;
   border-radius: 8px;
-  background: #ffffff;
-  box-shadow: 0 14px 34px rgba(25, 38, 62, 0.08);
+  background: #fbfdff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
 }
 
 .chart-panel {
@@ -295,6 +296,52 @@ h2 {
   min-height: 420px;
 }
 
+.telemetry-chart.compact {
+  height: 300px;
+  min-height: 280px;
+}
+
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.chart-tile {
+  min-width: 0;
+  border: 1px solid #c7d0db;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 12px;
+}
+
+.chart-tile-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.chart-tile-heading div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.chart-tile-heading strong {
+  color: #111827;
+  font-size: 0.9rem;
+}
+
+.chart-tile-heading span,
+.chart-tile-heading small {
+  color: #607089;
+  font-size: 0.74rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
 .chart-hints {
   display: flex;
   flex-wrap: wrap;
@@ -303,10 +350,10 @@ h2 {
 }
 
 .chart-hints span {
-  border: 1px solid #e2e8f0;
+  border: 1px solid #c7d0db;
   border-radius: 999px;
-  background: #f8fafc;
-  color: #667085;
+  background: #f7fafc;
+  color: #607089;
   padding: 4px 8px;
   font-size: 0.76rem;
   font-weight: 800;
@@ -359,7 +406,7 @@ h2 {
   gap: 1px;
   margin-bottom: 14px;
   overflow: hidden;
-  border: 1px solid #e2e8f0;
+  border: 1px solid #c7d0db;
   border-radius: 8px;
   background: #e2e8f0;
 }
@@ -368,7 +415,7 @@ h2 {
   display: grid;
   gap: 5px;
   min-width: 0;
-  background: #f8fafc;
+  background: #f7fafc;
   padding: 10px 12px;
 }
 
@@ -388,8 +435,8 @@ h2 {
 
 .unit-note {
   margin: -4px 0 14px;
-  border-left: 3px solid #0891b2;
-  background: #f8fafc;
+  border-left: 3px solid #007d79;
+  background: #f7fafc;
   color: #526176;
   padding: 9px 11px;
   font-size: 0.8rem;
@@ -400,6 +447,81 @@ h2 {
   display: grid;
   gap: 8px;
   margin-bottom: 14px;
+}
+
+.chart-config-panel {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.config-block {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  border: 1px solid #c7d0db;
+  border-radius: 8px;
+  background: #f7fafc;
+  padding: 12px;
+}
+
+.config-block > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.config-block strong {
+  color: #111827;
+  font-size: 0.86rem;
+}
+
+.config-block span,
+.config-block small {
+  color: #607089;
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.segmented-control {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid #c7d0db;
+  border-radius: 6px;
+  background: #c7d0db;
+}
+
+.segmented-control button,
+.function-toggle {
+  min-height: 34px;
+  border: 0;
+  background: #ffffff;
+  color: #334155;
+  padding: 7px 10px;
+  font-size: 0.8rem;
+  font-weight: 900;
+}
+
+.segmented-control button.active,
+.function-toggle.active {
+  background: #0f2f3a;
+  color: #f8fafc;
+}
+
+.function-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid #c7d0db;
+  border-radius: 6px;
+}
+
+.function-toggle small {
+  color: inherit;
+  opacity: 0.82;
 }
 
 .control-heading {
@@ -423,7 +545,7 @@ h2 {
 
 .channel-quick-actions button {
   min-height: 30px;
-  border: 1px solid #d7dde8;
+  border: 1px solid #c7d0db;
   border-radius: 6px;
   background: #f8fafc;
   color: #475569;
@@ -462,13 +584,13 @@ h2 {
 }
 
 .channel-button.active {
-  border-color: #0891b2;
-  background: #ecfeff;
-  color: #0e7490;
+  border-color: #007d79;
+  background: #e8f6f5;
+  color: #005d5d;
 }
 
 .channel-button.active small {
-  color: #0e7490;
+  color: #005d5d;
 }
 
 .run-actions {
@@ -493,10 +615,10 @@ h2 {
   align-items: center;
   justify-content: center;
   min-height: 46px;
-  border: 1px solid #0e7490;
+  border: 1px solid #007d79;
   border-radius: 8px;
   background: #ffffff;
-  color: #0e7490;
+  color: #005d5d;
   padding: 9px 12px;
   font-size: 0.84rem;
   font-weight: 800;
@@ -537,8 +659,8 @@ h2 {
 }
 
 .run-row.selected {
-  border-color: #0891b2;
-  background: #ecfeff;
+  border-color: #007d79;
+  background: #e8f6f5;
 }
 
 .run-row div {
@@ -594,13 +716,13 @@ h2 {
 }
 
 .file-drop:hover {
-  border-color: #0891b2;
+  border-color: #007d79;
   background: #f1fdff;
 }
 
 .file-drop.active {
-  border-color: #0891b2;
-  background: #ecfeff;
+  border-color: #007d79;
+  background: #e8f6f5;
 }
 
 .file-drop input {
@@ -797,6 +919,11 @@ h2 {
     max-height: none;
     overflow: visible;
     position: static;
+  }
+
+  .chart-grid,
+  .chart-config-panel {
+    grid-template-columns: 1fr;
   }
 }
 
