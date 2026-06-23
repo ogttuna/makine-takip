@@ -20,10 +20,13 @@ import {
 
 type QualityFilter = "all" | "time_gap" | "suspect_value";
 type ChartLayout = "overlay" | "grouped";
+type ThemeMode = "light" | "dark";
 
 type AnalysisFunctions = {
   shelfAverage: boolean;
 };
+
+const THEME_STORAGE_KEY = "freezedry.theme";
 
 const DEFAULT_ANALYSIS_FUNCTIONS: AnalysisFunctions = {
   shelfAverage: true,
@@ -49,6 +52,7 @@ export function App() {
   const queryClient = useQueryClient();
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
   const [chartLayout, setChartLayout] = useState<ChartLayout>("overlay");
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => initialThemeMode());
   const [analysisFunctions, setAnalysisFunctions] = useState<AnalysisFunctions>(
     DEFAULT_ANALYSIS_FUNCTIONS,
   );
@@ -138,6 +142,17 @@ export function App() {
     setQualityFilter("all");
   }, [selectedRunId]);
 
+  useEffect(() => {
+    document.documentElement.dataset.theme = themeMode;
+    document.documentElement.style.colorScheme = themeMode;
+
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, themeMode);
+    } catch {
+      // Theme persistence is optional; the UI still works if storage is blocked.
+    }
+  }, [themeMode]);
+
   const sourceLabel = runsQuery.isError
     ? "Collector erişilemiyor"
     : isRefreshing
@@ -164,25 +179,33 @@ export function App() {
           <h1>Çalışma İncelemesi</h1>
           <p>Freeze dry makine loglarını yerel olarak incele.</p>
         </div>
-        <div className="connection-strip" aria-busy={isRefreshing}>
-          <div className="connection-state">
-            <span
-              aria-hidden="true"
-              className={runsQuery.isError ? "status-dot" : "status-dot online"}
-            />
-            <div>
-              <strong>{sourceLabel}</strong>
-              <span>{getCollectorUrl()}</span>
+        <div className="topbar-actions">
+          <ThemeToggle
+            themeMode={themeMode}
+            onToggle={() =>
+              setThemeMode((current) => (current === "dark" ? "light" : "dark"))
+            }
+          />
+          <div className="connection-strip" aria-busy={isRefreshing}>
+            <div className="connection-state">
+              <span
+                aria-hidden="true"
+                className={runsQuery.isError ? "status-dot" : "status-dot online"}
+              />
+              <div>
+                <strong>{sourceLabel}</strong>
+                <span>{getCollectorUrl()}</span>
+              </div>
             </div>
+            <button
+              className="ghost-button"
+              disabled={isRefreshing}
+              onClick={refreshData}
+              type="button"
+            >
+              Yenile
+            </button>
           </div>
-          <button
-            className="ghost-button"
-            disabled={isRefreshing}
-            onClick={refreshData}
-            type="button"
-          >
-            Yenile
-          </button>
         </div>
       </header>
 
@@ -280,6 +303,7 @@ export function App() {
               layout={chartLayout}
               qualityEvents={qualityEvents}
               samples={samples}
+              themeMode={themeMode}
               visibleChannels={activeVisibleChannels}
             />
           )}
@@ -319,6 +343,31 @@ export function App() {
         </aside>
       </section>
     </main>
+  );
+}
+
+function ThemeToggle({
+  onToggle,
+  themeMode,
+}: {
+  onToggle: () => void;
+  themeMode: ThemeMode;
+}) {
+  const isDark = themeMode === "dark";
+
+  return (
+    <button
+      aria-label={isDark ? "Aydınlık moda geç" : "Koyu moda geç"}
+      aria-pressed={isDark}
+      className="theme-toggle"
+      onClick={onToggle}
+      type="button"
+    >
+      <span className="theme-toggle-track" aria-hidden="true">
+        <span className="theme-toggle-thumb" />
+      </span>
+      <span>{isDark ? "Koyu" : "Aydınlık"}</span>
+    </button>
   );
 }
 
@@ -549,11 +598,13 @@ function ChartArea({
   layout,
   qualityEvents,
   samples,
+  themeMode,
   visibleChannels,
 }: {
   layout: ChartLayout;
   qualityEvents: QualityEvent[];
   samples: SampleFrame[];
+  themeMode: ThemeMode;
   visibleChannels: string[];
 }) {
   const groupedCharts = chartGroupsFor(visibleChannels);
@@ -577,6 +628,7 @@ function ChartArea({
           <TelemetryChart
             qualityEvents={qualityEvents}
             samples={samples}
+            themeMode={themeMode}
             visibleChannels={visibleChannels}
           />
         ) : (
@@ -594,6 +646,7 @@ function ChartArea({
                   qualityEvents={qualityEvents}
                   samples={samples}
                   showSlider={false}
+                  themeMode={themeMode}
                   variant="compact"
                   visibleChannels={chart.channels}
                 />
@@ -1071,6 +1124,24 @@ function sourceKindLabel(sourceKind: string): string {
   }
 
   return sourceKind;
+}
+
+function initialThemeMode(): ThemeMode {
+  if (typeof window === "undefined") {
+    return "light";
+  }
+
+  try {
+    const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+
+    if (storedTheme === "light" || storedTheme === "dark") {
+      return storedTheme;
+    }
+  } catch {
+    // Fall through to system preference.
+  }
+
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
 function qualitySummaryLabel(count: number): string {

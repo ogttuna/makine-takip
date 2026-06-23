@@ -32,6 +32,7 @@ type TelemetryChartProps = {
   visibleChannels: string[];
   variant?: "large" | "compact";
   showSlider?: boolean;
+  themeMode?: "light" | "dark";
 };
 
 type TelemetryChartOption = ComposeOption<
@@ -64,6 +65,22 @@ type TooltipDatumParam = {
   value?: unknown;
 };
 
+type ChartPalette = {
+  axisLine: string;
+  axisText: string;
+  danger: string;
+  legendText: string;
+  pointer: string;
+  sliderBorder: string;
+  sliderFill: string;
+  sliderPreviewArea: string;
+  splitLine: string;
+  tooltipBackground: string;
+  tooltipBorder: string;
+  tooltipText: string;
+  zoomAccent: string;
+};
+
 echarts.use([
   CanvasRenderer,
   DataZoomComponent,
@@ -78,14 +95,15 @@ export function TelemetryChart({
   samples,
   qualityEvents,
   showSlider = true,
+  themeMode = "light",
   visibleChannels,
   variant = "large",
 }: TelemetryChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<EChartsType | null>(null);
   const series = useMemo(
-    () => buildSeries(samples, qualityEvents, visibleChannels),
-    [qualityEvents, samples, visibleChannels],
+    () => buildSeries(samples, qualityEvents, visibleChannels, themeMode),
+    [qualityEvents, samples, themeMode, visibleChannels],
   );
 
   useEffect(() => {
@@ -115,6 +133,7 @@ export function TelemetryChart({
     }
 
     const compact = variant === "compact";
+    const palette = chartPalette(themeMode);
     const dataZoom: DataZoomComponentOption[] = [
       {
         type: "inside",
@@ -127,21 +146,21 @@ export function TelemetryChart({
         type: "slider",
         bottom: compact ? 10 : 18,
         height: compact ? 18 : 24,
-        borderColor: "#c7d0db",
+        borderColor: palette.sliderBorder,
         brushSelect: false,
-        fillerColor: "rgba(0, 125, 121, 0.14)",
+        fillerColor: palette.sliderFill,
         handleSize: compact ? 12 : 16,
         moveHandleSize: 6,
         selectedDataBackground: {
           lineStyle: {
-            color: "#007d79",
+            color: palette.zoomAccent,
           },
           areaStyle: {
-            color: "rgba(0, 125, 121, 0.08)",
+            color: palette.sliderPreviewArea,
           },
         },
         textStyle: {
-          color: "#607089",
+          color: palette.axisText,
         },
         throttle: 80,
       });
@@ -163,7 +182,7 @@ export function TelemetryChart({
         right: 56,
         height: compact ? 36 : 56,
         textStyle: {
-          color: "#334155",
+          color: palette.legendText,
           fontFamily: "Inter, system-ui, sans-serif",
           fontSize: compact ? 11 : 12,
         },
@@ -175,24 +194,29 @@ export function TelemetryChart({
           animation: false,
           type: "line",
           lineStyle: {
-            color: "#8b9aad",
+            color: palette.pointer,
             type: "dashed",
             width: 1,
           },
         },
+        backgroundColor: palette.tooltipBackground,
+        borderColor: palette.tooltipBorder,
         formatter: formatTooltip,
+        textStyle: {
+          color: palette.tooltipText,
+        },
       },
       dataZoom,
       xAxis: {
         type: "time",
         axisLabel: {
-          color: "#607089",
+          color: palette.axisText,
           formatter: formatAxisTime,
           hideOverlap: true,
         },
         axisLine: {
           lineStyle: {
-            color: "#c7d0db",
+            color: palette.axisLine,
           },
         },
       },
@@ -201,7 +225,7 @@ export function TelemetryChart({
     };
 
     chartRef.current.setOption(option, true);
-  }, [series, showSlider, variant]);
+  }, [series, showSlider, themeMode, variant]);
 
   return (
     <div
@@ -215,13 +239,15 @@ function buildSeries(
   samples: SampleFrame[],
   qualityEvents: QualityEvent[],
   visibleChannels: string[],
+  themeMode: "light" | "dark",
 ): {
   colors: string[];
   series: Array<LineSeriesOption | ScatterSeriesOption>;
   yAxis: YAXisComponentOption[];
 } {
   const channels = sortChannels(visibleChannels);
-  const axisLayout = buildAxisLayout(channels);
+  const palette = chartPalette(themeMode);
+  const axisLayout = buildAxisLayout(channels, palette);
   const colors = channels.map((channel) => getChannelConfig(channel).color);
   const eventByFrameChannel = new Set(
     qualityEvents
@@ -333,7 +359,7 @@ function buildSeries(
         symbolSize: 10,
         data: suspectData as ScatterSeriesOption["data"],
         itemStyle: {
-          color: "#b91c1c",
+          color: palette.danger,
         },
         emphasis: {
           disabled: true,
@@ -348,7 +374,7 @@ function buildSeries(
   return { colors, series: result, yAxis: axisLayout.yAxis };
 }
 
-function buildAxisLayout(channels: string[]): AxisLayout {
+function buildAxisLayout(channels: string[], palette: ChartPalette): AxisLayout {
   const axisKinds = new Set<AxisKind>(
     channels.map((channel) => getChannelConfig(channel).axis),
   );
@@ -363,11 +389,11 @@ function buildAxisLayout(channels: string[]): AxisLayout {
       name: "Değer",
       position: "left",
       axisLabel: {
-        color: "#607089",
+        color: palette.axisText,
       },
       splitLine: {
         lineStyle: {
-          color: "#dde4ec",
+          color: palette.splitLine,
         },
       },
     });
@@ -381,18 +407,54 @@ function buildAxisLayout(channels: string[]): AxisLayout {
       min: 0.000_001,
       position: includeMainAxis ? "right" : "left",
       axisLabel: {
-        color: "#607089",
+        color: palette.axisText,
       },
       splitLine: {
         show: !includeMainAxis,
         lineStyle: {
-          color: "#dde4ec",
+          color: palette.splitLine,
         },
       },
     });
   }
 
   return { indexByKind, yAxis };
+}
+
+function chartPalette(themeMode: "light" | "dark"): ChartPalette {
+  if (themeMode === "dark") {
+    return {
+      axisLine: "#30433c",
+      axisText: "#92a69d",
+      danger: "#fb7185",
+      legendText: "#d7e4de",
+      pointer: "#8aa199",
+      sliderBorder: "#30433c",
+      sliderFill: "rgba(45, 212, 191, 0.18)",
+      sliderPreviewArea: "rgba(45, 212, 191, 0.1)",
+      splitLine: "#1f302b",
+      tooltipBackground: "rgba(10, 17, 16, 0.96)",
+      tooltipBorder: "#30433c",
+      tooltipText: "#d7e4de",
+      zoomAccent: "#2dd4bf",
+    };
+  }
+
+  return {
+    axisLine: "#c7d0db",
+    axisText: "#607089",
+    danger: "#b91c1c",
+    legendText: "#334155",
+    pointer: "#8b9aad",
+    sliderBorder: "#c7d0db",
+    sliderFill: "rgba(0, 125, 121, 0.14)",
+    sliderPreviewArea: "rgba(0, 125, 121, 0.08)",
+    splitLine: "#dde4ec",
+    tooltipBackground: "rgba(255, 255, 255, 0.96)",
+    tooltipBorder: "#c7d0db",
+    tooltipText: "#334155",
+    zoomAccent: "#007d79",
+  };
 }
 
 function axisIndexFor(axisLayout: AxisLayout, axis: AxisKind): number {
