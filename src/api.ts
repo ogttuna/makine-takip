@@ -58,6 +58,31 @@ export const qualityEventSchema = z.object({
   metadata_json: z.string().nullable(),
 });
 
+export const stateObservationSchema = z.object({
+  id: z.number(),
+  frame_id: z.number().nullable(),
+  sampled_at: z.string(),
+  source_sequence: z.number(),
+  source_recipe_code: z.string().nullable(),
+  source_recipe_version: z.string().nullable(),
+  source_state_code: z.string(),
+  source_state_name: z.string().nullable(),
+  source_payload_json: z.string().nullable(),
+});
+
+export const stateSegmentSchema = z.object({
+  id: z.number(),
+  run_recipe_assignment_id: z.number(),
+  recipe_state_id: z.number().nullable(),
+  recipe_state_code: z.string().nullable(),
+  recipe_state_name: z.string().nullable(),
+  started_at: z.string(),
+  finished_at: z.string().nullable(),
+  source: z.string(),
+  confidence: z.number().nullable(),
+  metadata_json: z.string().nullable(),
+});
+
 export const runsResponseSchema = z.object({
   runs: z.array(runSummarySchema),
 });
@@ -70,16 +95,158 @@ export const qualityEventsResponseSchema = z.object({
   events: z.array(qualityEventSchema),
 });
 
+export const stateObservationsResponseSchema = z.object({
+  observations: z.array(stateObservationSchema),
+});
+
+export const stateSegmentsResponseSchema = z.object({
+  segments: z.array(stateSegmentSchema),
+});
+
+export const appendSamplesReportSchema = z.object({
+  run_id: z.number(),
+  inserted_count: z.number(),
+  skipped_count: z.number(),
+  channel_count: z.number(),
+  warning_count: z.number(),
+  error_count: z.number(),
+  latest_sampled_at: z.string().nullable(),
+});
+
+export const csvTailStatusSchema = z.object({
+  configured: z.boolean(),
+  name: z.string(),
+  directory_path: z.string(),
+  file_pattern: z.string(),
+  scan_interval_ms: z.number(),
+  enabled: z.boolean(),
+  status: z.enum(["stopped", "scanning", "tailing", "switching", "degraded"]),
+  active_file_path: z.string().nullable(),
+  active_run_id: z.number().nullable(),
+  byte_offset: z.number().nullable(),
+  last_source_sequence: z.number().nullable(),
+  last_sampled_at: z.string().nullable(),
+  last_scan_at: z.string().nullable(),
+  last_error: z.string().nullable(),
+});
+
 export type ImportReport = z.infer<typeof importReportSchema>;
 export type RunSummary = z.infer<typeof runSummarySchema>;
 export type Measurement = z.infer<typeof measurementSchema>;
 export type SampleFrame = z.infer<typeof sampleFrameSchema>;
 export type QualityEvent = z.infer<typeof qualityEventSchema>;
+export type StateObservation = z.infer<typeof stateObservationSchema>;
+export type StateSegment = z.infer<typeof stateSegmentSchema>;
+export type AppendSamplesReport = z.infer<typeof appendSamplesReportSchema>;
+export type CsvTailStatus = z.infer<typeof csvTailStatusSchema>;
+
+export type CsvTailConfigPayload = {
+  name?: string;
+  directory_path: string;
+  file_pattern?: string;
+  scan_interval_ms?: number;
+};
+
+export type CreateRunPayload = {
+  name: string;
+  source_kind?: string;
+  source_name?: string | null;
+  started_at?: string | null;
+  notes?: string | null;
+};
+
+export type AppendMeasurementPayload = {
+  channel_code: string;
+  raw_text?: string | null;
+  numeric_value?: number | null;
+  value_text?: string | null;
+  value_type?: string | null;
+  quality?: "good" | "suspect" | "invalid" | null;
+  quality_reason?: string | null;
+};
+
+export type AppendStateObservationPayload = {
+  source_recipe_code?: string | null;
+  source_recipe_version?: string | null;
+  source_state_code: string;
+  source_state_name?: string | null;
+  source_payload_json?: unknown;
+};
+
+export type AppendSamplePayload = {
+  sampled_at: string;
+  source_timestamp_text?: string | null;
+  source_sequence?: number | null;
+  state_observation?: AppendStateObservationPayload | null;
+  measurements: AppendMeasurementPayload[];
+};
+
+export type AppendSamplesPayload = {
+  samples: AppendSamplePayload[];
+};
+
+export type RunStatus = "imported" | "running" | "completed" | "aborted" | "failed";
+
+export type UpdateRunStatusPayload = {
+  status: RunStatus;
+  finished_at?: string | null;
+  notes?: string | null;
+};
+
+export type FetchRunSamplesOptions = {
+  from?: string;
+  to?: string;
+  limit?: number;
+  latest?: number;
+  afterSequence?: number;
+};
 
 const apiBaseUrl = import.meta.env.VITE_COLLECTOR_URL ?? "http://127.0.0.1:4777";
 
 async function getJson(url: string): Promise<unknown> {
   const response = await fetch(url);
+
+  if (!response.ok) {
+    throw new Error(await responseMessage(response));
+  }
+
+  return response.json();
+}
+
+async function postJson(url: string, payload: unknown): Promise<unknown> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    throw new Error(await responseMessage(response));
+  }
+
+  return response.json();
+}
+
+async function putJson(url: string, payload: unknown): Promise<unknown> {
+  const response = await fetch(url, {
+    method: "PUT",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    throw new Error(await responseMessage(response));
+  }
+
+  return response.json();
+}
+
+async function postEmpty(url: string): Promise<unknown> {
+  const response = await fetch(url, { method: "POST" });
 
   if (!response.ok) {
     throw new Error(await responseMessage(response));
@@ -119,14 +286,142 @@ export async function fetchRuns(): Promise<RunSummary[]> {
   return runsResponseSchema.parse(payload).runs;
 }
 
-export async function fetchRunSamples(runId: number): Promise<SampleFrame[]> {
-  const payload = await getJson(`${apiBaseUrl}/api/runs/${runId}/samples`);
+export async function createRun(payload: CreateRunPayload): Promise<RunSummary> {
+  const response = await postJson(`${apiBaseUrl}/api/runs`, payload);
+  return runSummarySchema.parse(response);
+}
+
+export async function updateRunStatus(
+  runId: number,
+  payload: UpdateRunStatusPayload,
+): Promise<RunSummary> {
+  const response = await fetch(`${apiBaseUrl}/api/runs/${runId}/status`, {
+    method: "PATCH",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    throw new Error(await responseMessage(response));
+  }
+
+  return runSummarySchema.parse(await response.json());
+}
+
+export async function fetchRunSamples(
+  runId: number,
+  options: FetchRunSamplesOptions = {},
+): Promise<SampleFrame[]> {
+  const url = new URL(`${apiBaseUrl}/api/runs/${runId}/samples`);
+
+  if (options.from) {
+    url.searchParams.set("from", options.from);
+  }
+
+  if (options.to) {
+    url.searchParams.set("to", options.to);
+  }
+
+  if (options.limit !== undefined) {
+    url.searchParams.set("limit", String(options.limit));
+  }
+
+  if (options.latest !== undefined) {
+    url.searchParams.set("latest", String(options.latest));
+  }
+
+  if (options.afterSequence !== undefined) {
+    url.searchParams.set("after_sequence", String(options.afterSequence));
+  }
+
+  const payload = await getJson(url.toString());
   return samplesResponseSchema.parse(payload).samples;
+}
+
+export async function appendRunSamples(
+  runId: number,
+  payload: AppendSamplesPayload,
+): Promise<AppendSamplesReport> {
+  const response = await postJson(`${apiBaseUrl}/api/runs/${runId}/samples`, payload);
+  return appendSamplesReportSchema.parse(response);
 }
 
 export async function fetchQualityEvents(runId: number): Promise<QualityEvent[]> {
   const payload = await getJson(`${apiBaseUrl}/api/runs/${runId}/quality-events`);
   return qualityEventsResponseSchema.parse(payload).events;
+}
+
+export async function fetchCsvTailStatus(): Promise<CsvTailStatus> {
+  const payload = await getJson(`${apiBaseUrl}/api/csv-tail`);
+  return csvTailStatusSchema.parse(payload);
+}
+
+export async function configureCsvTail(
+  payload: CsvTailConfigPayload,
+): Promise<CsvTailStatus> {
+  const response = await putJson(`${apiBaseUrl}/api/csv-tail`, payload);
+  return csvTailStatusSchema.parse(response);
+}
+
+export async function startCsvTail(): Promise<CsvTailStatus> {
+  const response = await postEmpty(`${apiBaseUrl}/api/csv-tail/start`);
+  return csvTailStatusSchema.parse(response);
+}
+
+export async function stopCsvTail(): Promise<CsvTailStatus> {
+  const response = await postEmpty(`${apiBaseUrl}/api/csv-tail/stop`);
+  return csvTailStatusSchema.parse(response);
+}
+
+export async function rescanCsvTail(): Promise<CsvTailStatus> {
+  const response = await postEmpty(`${apiBaseUrl}/api/csv-tail/rescan`);
+  return csvTailStatusSchema.parse(response);
+}
+
+export async function fetchRunStateObservations(
+  runId: number,
+  options: FetchRunSamplesOptions = {},
+): Promise<StateObservation[]> {
+  const url = new URL(`${apiBaseUrl}/api/runs/${runId}/state-observations`);
+
+  if (options.from) {
+    url.searchParams.set("from", options.from);
+  }
+
+  if (options.to) {
+    url.searchParams.set("to", options.to);
+  }
+
+  if (options.limit !== undefined) {
+    url.searchParams.set("limit", String(options.limit));
+  }
+
+  const payload = await getJson(url.toString());
+  return stateObservationsResponseSchema.parse(payload).observations;
+}
+
+export async function fetchRunStateSegments(
+  runId: number,
+  options: FetchRunSamplesOptions = {},
+): Promise<StateSegment[]> {
+  const url = new URL(`${apiBaseUrl}/api/runs/${runId}/state-segments`);
+
+  if (options.from) {
+    url.searchParams.set("from", options.from);
+  }
+
+  if (options.to) {
+    url.searchParams.set("to", options.to);
+  }
+
+  if (options.limit !== undefined) {
+    url.searchParams.set("limit", String(options.limit));
+  }
+
+  const payload = await getJson(url.toString());
+  return stateSegmentsResponseSchema.parse(payload).segments;
 }
 
 export function getCollectorUrl(): string {

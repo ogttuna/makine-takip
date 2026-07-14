@@ -1,0 +1,946 @@
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+
+use anyhow::{Context, anyhow, bail};
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use sqlx::{FromRow, SqlitePool};
+use tokio::sync::{Mutex, Notify, RwLock, watch};
+use tokio::task::JoinHandle;
+
+use crate::csv_import::{ParsedCsv, import_csv_bytes, parse_csv_bytes};
+use crate::ingest::{
+    AppendMeasurementRequest, AppendSampleRequest, AppendSamplesRequest, CreateRunRequest,
+    append_samples, create_run,
+};
+
+const SOURCE_ID: i64 = 1;
+const DEFAULT_NAME: &str = "Freeze dryer CSV";
+const DEFAULT_PATTERN: &str = "*.csv";
+const DEFAULT_SCAN_INTERVAL_MS: i64 = 30_000;
+
+#[derive(Debug, Deserialize)]
+pub struct CsvTailConfigRequest {
+    pub name: Option<String>,
+    pub directory_path: String,
+    pub file_pattern: Option<String>,
+    pub scan_interval_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CsvTailStatus {
+    pub configured: bool,
+    pub name: String,
+    pub directory_path: String,
+    pub file_pattern: String,
+    pub scan_interval_ms: i64,
+    pub enabled: bool,
+    pub status: String,
+    pub active_file_path: Option<String>,
+    pub active_run_id: Option<i64>,
+    pub byte_offset: Option<i64>,
+    pub last_source_sequence: Option<i64>,
+    pub last_sampled_at: Option<String>,
+    pub last_scan_at: Option<String>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct CsvTailSource {
+    id: i64,
+    name: String,
+    directory_path: String,
+    file_pattern: String,
+    scan_interval_ms: i64,
+    enabled: i64,
+    active_file_path: Option<String>,
+    active_run_id: Option<i64>,
+    last_scan_at: Option<String>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct CsvTailCheckpoint {
+    id: i64,
+    run_id: Option<i64>,
+    byte_offset: i64,
+    last_source_sequence: i64,
+    header_line: Option<String>,
+    completed: i64,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeState {
+    status: String,
+}
+
+impl Default for RuntimeState {
+    fn default() -> Self {
+        Self {
+            status: "stopped".to_string(),
+        }
+    }
+}
+
+struct WorkerControl {
+    stop: watch::Sender<bool>,
+    join: JoinHandle<()>,
+}
+
+struct CsvTailInner {
+    pool: SqlitePool,
+    runtime: RwLock<RuntimeState>,
+    worker: Mutex<Option<WorkerControl>>,
+    rescan: Notify,
+}
+
+#[derive(Clone)]
+pub struct CsvTailManager {
+    inner: Arc<CsvTailInner>,
+}
+
+impl CsvTailManager {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self {
+            inner: Arc::new(CsvTailInner {
+                pool,
+                runtime: RwLock::new(RuntimeState::default()),
+                worker: Mutex::new(None),
+                rescan: Notify::new(),
+            }),
+        }
+    }
+
+    pub async fn start_if_enabled(&self) -> anyhow::Result<()> {
+        if load_source(&self.inner.pool)
+            .await?
+            .is_some_and(|source| source.enabled == 1)
+        {
+            self.spawn_worker().await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn configure(&self, request: CsvTailConfigRequest) -> anyhow::Result<CsvTailStatus> {
+        self.stop().await?;
+
+        let name = non_empty(
+            request.name.unwrap_or_else(|| DEFAULT_NAME.to_string()),
+            "name",
+        )?;
+        let file_pattern = non_empty(
+            request
+                .file_pattern
+                .unwrap_or_else(|| DEFAULT_PATTERN.to_string()),
+            "file_pattern",
+        )?;
+        let scan_interval_ms = request.scan_interval_ms.unwrap_or(DEFAULT_SCAN_INTERVAL_MS);
+
+        if !(250..=60_000).contains(&scan_interval_ms) {
+            bail!("scan_interval_ms must be between 250 and 60000");
+        }
+
+        let directory = canonical_directory(&request.directory_path)?;
+        let directory_path = directory.to_string_lossy().to_string();
+
+        finish_active_run(&self.inner.pool).await?;
+        sqlx::query(
+            r#"
+            INSERT INTO csv_tail_sources (
+                id,
+                name,
+                directory_path,
+                file_pattern,
+                scan_interval_ms,
+                enabled,
+                active_file_path,
+                active_run_id,
+                last_error,
+                updated_at
+            )
+            VALUES (1, ?1, ?2, ?3, ?4, 0, NULL, NULL, NULL, ?5)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                directory_path = excluded.directory_path,
+                file_pattern = excluded.file_pattern,
+                scan_interval_ms = excluded.scan_interval_ms,
+                enabled = 0,
+                active_file_path = NULL,
+                active_run_id = NULL,
+                last_error = NULL,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(name)
+        .bind(directory_path)
+        .bind(file_pattern)
+        .bind(scan_interval_ms)
+        .bind(now())
+        .execute(&self.inner.pool)
+        .await?;
+
+        self.set_runtime_status("stopped").await;
+        self.status().await
+    }
+
+    pub async fn start(&self) -> anyhow::Result<CsvTailStatus> {
+        if load_source(&self.inner.pool).await?.is_none() {
+            bail!("CSV tail directory is not configured");
+        }
+
+        sqlx::query(
+            "UPDATE csv_tail_sources SET enabled = 1, last_error = NULL, updated_at = ?2 WHERE id = ?1",
+        )
+        .bind(SOURCE_ID)
+        .bind(now())
+        .execute(&self.inner.pool)
+        .await?;
+
+        self.spawn_worker().await?;
+        self.status().await
+    }
+
+    pub async fn stop(&self) -> anyhow::Result<CsvTailStatus> {
+        sqlx::query("UPDATE csv_tail_sources SET enabled = 0, updated_at = ?2 WHERE id = ?1")
+            .bind(SOURCE_ID)
+            .bind(now())
+            .execute(&self.inner.pool)
+            .await?;
+
+        let control = self.inner.worker.lock().await.take();
+
+        if let Some(control) = control {
+            let _ = control.stop.send(true);
+            let _ = control.join.await;
+        }
+
+        self.set_runtime_status("stopped").await;
+        self.status().await
+    }
+
+    pub async fn rescan(&self) -> anyhow::Result<CsvTailStatus> {
+        let is_running = self
+            .inner
+            .worker
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|control| !control.join.is_finished());
+
+        if is_running {
+            self.inner.rescan.notify_one();
+            self.status().await
+        } else {
+            self.scan_once().await
+        }
+    }
+
+    pub async fn scan_once(&self) -> anyhow::Result<CsvTailStatus> {
+        let source = load_source(&self.inner.pool)
+            .await?
+            .ok_or_else(|| anyhow!("CSV tail directory is not configured"))?;
+
+        match self.scan_source(&source).await {
+            Ok(()) => self.clear_error().await?,
+            Err(error) => {
+                self.record_error(&error).await?;
+                return Err(error);
+            }
+        }
+
+        self.status().await
+    }
+
+    pub async fn status(&self) -> anyhow::Result<CsvTailStatus> {
+        let Some(source) = load_source(&self.inner.pool).await? else {
+            return Ok(CsvTailStatus {
+                configured: false,
+                name: DEFAULT_NAME.to_string(),
+                directory_path: String::new(),
+                file_pattern: DEFAULT_PATTERN.to_string(),
+                scan_interval_ms: DEFAULT_SCAN_INTERVAL_MS,
+                enabled: false,
+                status: "stopped".to_string(),
+                active_file_path: None,
+                active_run_id: None,
+                byte_offset: None,
+                last_source_sequence: None,
+                last_sampled_at: None,
+                last_scan_at: None,
+                last_error: None,
+            });
+        };
+
+        let checkpoint = match source.active_file_path.as_deref() {
+            Some(path) => load_checkpoint(&self.inner.pool, path).await?,
+            None => None,
+        };
+        let last_sampled_at = match source.active_run_id {
+            Some(run_id) => {
+                sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT MAX(sampled_at) FROM sample_frames WHERE run_id = ?1",
+                )
+                .bind(run_id)
+                .fetch_one(&self.inner.pool)
+                .await?
+            }
+            None => None,
+        };
+        let runtime_status = self.inner.runtime.read().await.status.clone();
+
+        Ok(CsvTailStatus {
+            configured: true,
+            name: source.name,
+            directory_path: source.directory_path,
+            file_pattern: source.file_pattern,
+            scan_interval_ms: source.scan_interval_ms,
+            enabled: source.enabled == 1,
+            status: if source.enabled == 0 {
+                "stopped".to_string()
+            } else {
+                runtime_status
+            },
+            active_file_path: source.active_file_path,
+            active_run_id: source.active_run_id,
+            byte_offset: checkpoint.as_ref().map(|item| item.byte_offset),
+            last_source_sequence: checkpoint.as_ref().map(|item| item.last_source_sequence),
+            last_sampled_at,
+            last_scan_at: source.last_scan_at,
+            last_error: source.last_error,
+        })
+    }
+
+    async fn spawn_worker(&self) -> anyhow::Result<()> {
+        let mut worker = self.inner.worker.lock().await;
+
+        if worker
+            .as_ref()
+            .is_some_and(|control| !control.join.is_finished())
+        {
+            return Ok(());
+        }
+
+        let (stop, stop_rx) = watch::channel(false);
+        let manager = self.clone();
+        let join = tokio::spawn(async move {
+            manager.run_loop(stop_rx).await;
+        });
+        *worker = Some(WorkerControl { stop, join });
+        self.set_runtime_status("scanning").await;
+
+        Ok(())
+    }
+
+    async fn run_loop(&self, mut stop: watch::Receiver<bool>) {
+        loop {
+            if *stop.borrow() {
+                break;
+            }
+
+            let source = match load_source(&self.inner.pool).await {
+                Ok(Some(source)) if source.enabled == 1 => source,
+                Ok(_) => break,
+                Err(error) => {
+                    tracing::error!(%error, "failed to load CSV tail source");
+                    break;
+                }
+            };
+
+            if let Err(error) = self.scan_source(&source).await {
+                tracing::warn!(%error, "CSV tail scan failed");
+                if let Err(record_error) = self.record_error(&error).await {
+                    tracing::error!(%record_error, "failed to store CSV tail error");
+                }
+            } else if let Err(error) = self.clear_error().await {
+                tracing::warn!(%error, "failed to clear CSV tail error");
+            }
+
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(source.scan_interval_ms as u64)) => {}
+                _ = self.inner.rescan.notified() => {}
+                changed = stop.changed() => {
+                    if changed.is_err() || *stop.borrow() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn scan_source(&self, source: &CsvTailSource) -> anyhow::Result<()> {
+        self.set_runtime_status("scanning").await;
+        let files = discover_files(&source.directory_path, &source.file_pattern)?;
+        let scan_time = now();
+        sqlx::query("UPDATE csv_tail_sources SET last_scan_at = ?2, updated_at = ?2 WHERE id = ?1")
+            .bind(source.id)
+            .bind(&scan_time)
+            .execute(&self.inner.pool)
+            .await?;
+
+        let Some(newest) = files.last() else {
+            return Ok(());
+        };
+
+        if let Some(active_path) = source.active_file_path.as_deref() {
+            if newest.path != active_path && read_header(Path::new(&newest.path))?.is_some() {
+                self.rotate_to(source, &newest.path).await?;
+            } else {
+                self.tail_path(active_path, false).await?;
+            }
+
+            self.set_runtime_status("tailing").await;
+            return Ok(());
+        }
+
+        for file in files.iter().take(files.len().saturating_sub(1)) {
+            if let Err(error) = self.backfill_file(source.id, &file.path).await {
+                tracing::warn!(file_path = %file.path, %error, "historical CSV backfill failed");
+            }
+        }
+
+        if load_checkpoint(&self.inner.pool, &newest.path)
+            .await?
+            .is_some_and(|checkpoint| checkpoint.completed == 1)
+        {
+            return Ok(());
+        }
+
+        if read_header(Path::new(&newest.path))?.is_some() {
+            self.start_file(source.id, &newest.path).await?;
+            self.set_runtime_status("tailing").await;
+        }
+
+        Ok(())
+    }
+
+    async fn backfill_file(&self, source_id: i64, file_path: &str) -> anyhow::Result<()> {
+        if load_checkpoint(&self.inner.pool, file_path)
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        let bytes = fs::read(file_path)
+            .with_context(|| format!("failed to read historical CSV `{file_path}`"))?;
+        let file_name = file_name(file_path)?;
+        let report = import_csv_bytes(&self.inner.pool, file_name, &bytes).await?;
+        let header_line = read_header(Path::new(file_path))?.map(|item| item.0);
+
+        sqlx::query(
+            r#"
+            INSERT INTO csv_tail_checkpoints (
+                source_id,
+                file_path,
+                run_id,
+                byte_offset,
+                last_source_sequence,
+                header_line,
+                file_size,
+                completed,
+                updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?4, 1, ?7)
+            "#,
+        )
+        .bind(source_id)
+        .bind(file_path)
+        .bind(report.run_id)
+        .bind(bytes.len() as i64)
+        .bind(report.row_count as i64 + 1)
+        .bind(header_line)
+        .bind(now())
+        .execute(&self.inner.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn start_file(&self, source_id: i64, file_path: &str) -> anyhow::Result<()> {
+        let (header_line, header_offset) = read_header(Path::new(file_path))?
+            .ok_or_else(|| anyhow!("CSV `{file_path}` does not contain a complete header"))?;
+        let metadata = fs::metadata(file_path)?;
+        let run_id = create_run(
+            &self.inner.pool,
+            CreateRunRequest {
+                name: file_name(file_path)?,
+                source_kind: "csv_tail".to_string(),
+                source_name: Some(file_path.to_string()),
+                started_at: None,
+                notes: Some("Automatically tailed machine CSV".to_string()),
+            },
+        )
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO csv_tail_checkpoints (
+                source_id,
+                file_path,
+                run_id,
+                byte_offset,
+                last_source_sequence,
+                header_line,
+                file_size,
+                completed,
+                updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, 0, ?7)
+            ON CONFLICT(source_id, file_path) DO UPDATE SET
+                run_id = excluded.run_id,
+                byte_offset = excluded.byte_offset,
+                last_source_sequence = 1,
+                header_line = excluded.header_line,
+                file_size = excluded.file_size,
+                completed = 0,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(source_id)
+        .bind(file_path)
+        .bind(run_id)
+        .bind(header_offset as i64)
+        .bind(header_line)
+        .bind(metadata.len() as i64)
+        .bind(now())
+        .execute(&self.inner.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            UPDATE csv_tail_sources
+            SET active_file_path = ?2, active_run_id = ?3, updated_at = ?4
+            WHERE id = ?1
+            "#,
+        )
+        .bind(source_id)
+        .bind(file_path)
+        .bind(run_id)
+        .bind(now())
+        .execute(&self.inner.pool)
+        .await?;
+
+        self.tail_path(file_path, false).await
+    }
+
+    async fn rotate_to(&self, source: &CsvTailSource, new_path: &str) -> anyhow::Result<()> {
+        self.set_runtime_status("switching").await;
+
+        if let Some(active_path) = source.active_file_path.as_deref() {
+            self.tail_path(active_path, true).await?;
+            sqlx::query(
+                "UPDATE csv_tail_checkpoints SET completed = 1, updated_at = ?2 WHERE source_id = ?1 AND file_path = ?3",
+            )
+            .bind(source.id)
+            .bind(now())
+            .bind(active_path)
+            .execute(&self.inner.pool)
+            .await?;
+        }
+
+        if let Some(run_id) = source.active_run_id {
+            complete_run(&self.inner.pool, run_id).await?;
+        }
+
+        sqlx::query(
+            "UPDATE csv_tail_sources SET active_file_path = NULL, active_run_id = NULL, updated_at = ?2 WHERE id = ?1",
+        )
+        .bind(source.id)
+        .bind(now())
+        .execute(&self.inner.pool)
+        .await?;
+
+        self.start_file(source.id, new_path).await
+    }
+
+    async fn tail_path(&self, file_path: &str, accept_eof: bool) -> anyhow::Result<()> {
+        let checkpoint = load_checkpoint(&self.inner.pool, file_path)
+            .await?
+            .ok_or_else(|| anyhow!("missing checkpoint for `{file_path}`"))?;
+
+        if checkpoint.completed == 1 {
+            return Ok(());
+        }
+
+        let run_id = checkpoint
+            .run_id
+            .ok_or_else(|| anyhow!("checkpoint for `{file_path}` has no run"))?;
+        let header_line = checkpoint
+            .header_line
+            .as_deref()
+            .ok_or_else(|| anyhow!("checkpoint for `{file_path}` has no CSV header"))?;
+        let metadata = fs::metadata(file_path)
+            .with_context(|| format!("failed to inspect active CSV `{file_path}`"))?;
+
+        if metadata.len() < checkpoint.byte_offset as u64 {
+            bail!("active CSV `{file_path}` was truncated or replaced");
+        }
+
+        let chunk = read_new_bytes(Path::new(file_path), checkpoint.byte_offset as u64)?;
+        let consumed = complete_prefix_len(&chunk, accept_eof);
+
+        if consumed == 0 {
+            update_checkpoint_size(&self.inner.pool, checkpoint.id, metadata.len()).await?;
+            return Ok(());
+        }
+
+        let complete_bytes = &chunk[..consumed];
+
+        if complete_bytes.iter().all(u8::is_ascii_whitespace) {
+            update_checkpoint(
+                &self.inner.pool,
+                checkpoint.id,
+                checkpoint.byte_offset + consumed as i64,
+                checkpoint.last_source_sequence,
+                metadata.len(),
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let mut csv_bytes = Vec::with_capacity(header_line.len() + 1 + complete_bytes.len());
+        csv_bytes.extend_from_slice(header_line.as_bytes());
+        csv_bytes.push(b'\n');
+        csv_bytes.extend_from_slice(complete_bytes);
+        let parsed = parse_csv_bytes(file_name(file_path)?, &csv_bytes)?;
+        let sample_count = parsed.frames.len() as i64;
+        let request = parsed_to_append_request(parsed, checkpoint.last_source_sequence + 1);
+
+        append_samples(&self.inner.pool, run_id, request).await?;
+        update_checkpoint(
+            &self.inner.pool,
+            checkpoint.id,
+            checkpoint.byte_offset + consumed as i64,
+            checkpoint.last_source_sequence + sample_count,
+            metadata.len(),
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn record_error(&self, error: &anyhow::Error) -> anyhow::Result<()> {
+        self.set_runtime_status("degraded").await;
+        sqlx::query(
+            "UPDATE csv_tail_sources SET last_error = ?2, last_scan_at = ?3, updated_at = ?3 WHERE id = ?1",
+        )
+        .bind(SOURCE_ID)
+        .bind(error.to_string())
+        .bind(now())
+        .execute(&self.inner.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn clear_error(&self) -> anyhow::Result<()> {
+        sqlx::query("UPDATE csv_tail_sources SET last_error = NULL, updated_at = ?2 WHERE id = ?1")
+            .bind(SOURCE_ID)
+            .bind(now())
+            .execute(&self.inner.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn set_runtime_status(&self, status: &str) {
+        self.inner.runtime.write().await.status = status.to_string();
+    }
+}
+
+fn parsed_to_append_request(parsed: ParsedCsv, first_sequence: i64) -> AppendSamplesRequest {
+    let samples = parsed
+        .frames
+        .into_iter()
+        .enumerate()
+        .map(|(index, frame)| AppendSampleRequest {
+            sampled_at: frame.sampled_at,
+            source_timestamp_text: Some(frame.source_timestamp_text),
+            source_sequence: Some(first_sequence + index as i64),
+            state_observation: None,
+            measurements: frame
+                .measurements
+                .into_iter()
+                .map(|measurement| AppendMeasurementRequest {
+                    channel_code: measurement.channel_code,
+                    raw_text: Some(measurement.raw_text),
+                    numeric_value: measurement.numeric_value,
+                    value_text: measurement.value_text,
+                    value_type: Some(measurement.value_type.as_str().to_string()),
+                    quality: Some(measurement.quality.as_str().to_string()),
+                    quality_reason: measurement.quality_reason,
+                })
+                .collect(),
+        })
+        .collect();
+
+    AppendSamplesRequest { samples }
+}
+
+async fn load_source(pool: &SqlitePool) -> anyhow::Result<Option<CsvTailSource>> {
+    Ok(sqlx::query_as::<_, CsvTailSource>(
+        r#"
+        SELECT
+            id,
+            name,
+            directory_path,
+            file_pattern,
+            scan_interval_ms,
+            enabled,
+            active_file_path,
+            active_run_id,
+            last_scan_at,
+            last_error
+        FROM csv_tail_sources
+        WHERE id = 1
+        "#,
+    )
+    .fetch_optional(pool)
+    .await?)
+}
+
+async fn load_checkpoint(
+    pool: &SqlitePool,
+    file_path: &str,
+) -> anyhow::Result<Option<CsvTailCheckpoint>> {
+    Ok(sqlx::query_as::<_, CsvTailCheckpoint>(
+        r#"
+        SELECT
+            id,
+            run_id,
+            byte_offset,
+            last_source_sequence,
+            header_line,
+            completed
+        FROM csv_tail_checkpoints
+        WHERE source_id = 1 AND file_path = ?1
+        "#,
+    )
+    .bind(file_path)
+    .fetch_optional(pool)
+    .await?)
+}
+
+async fn update_checkpoint(
+    pool: &SqlitePool,
+    checkpoint_id: i64,
+    byte_offset: i64,
+    last_source_sequence: i64,
+    file_size: u64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE csv_tail_checkpoints
+        SET
+            byte_offset = ?2,
+            last_source_sequence = ?3,
+            file_size = ?4,
+            updated_at = ?5
+        WHERE id = ?1
+        "#,
+    )
+    .bind(checkpoint_id)
+    .bind(byte_offset)
+    .bind(last_source_sequence)
+    .bind(file_size as i64)
+    .bind(now())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn update_checkpoint_size(
+    pool: &SqlitePool,
+    checkpoint_id: i64,
+    file_size: u64,
+) -> anyhow::Result<()> {
+    sqlx::query("UPDATE csv_tail_checkpoints SET file_size = ?2, updated_at = ?3 WHERE id = ?1")
+        .bind(checkpoint_id)
+        .bind(file_size as i64)
+        .bind(now())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn finish_active_run(pool: &SqlitePool) -> anyhow::Result<()> {
+    let run_id = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT active_run_id FROM csv_tail_sources WHERE id = 1",
+    )
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+
+    if let Some(run_id) = run_id {
+        complete_run(pool, run_id).await?;
+    }
+
+    Ok(())
+}
+
+async fn complete_run(pool: &SqlitePool, run_id: i64) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE runs
+        SET
+            status = 'completed',
+            finished_at = COALESCE(
+                finished_at,
+                (SELECT MAX(sampled_at) FROM sample_frames WHERE run_id = ?1)
+            )
+        WHERE id = ?1 AND status = 'running'
+        "#,
+    )
+    .bind(run_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[derive(Debug)]
+struct FileCandidate {
+    path: String,
+    modified: SystemTime,
+}
+
+fn discover_files(directory_path: &str, pattern: &str) -> anyhow::Result<Vec<FileCandidate>> {
+    let mut files = Vec::new();
+
+    for entry in fs::read_dir(directory_path)
+        .with_context(|| format!("failed to read CSV directory `{directory_path}`"))?
+    {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+
+        if !metadata.is_file() {
+            continue;
+        }
+
+        let file_name = entry.file_name().to_string_lossy().to_string();
+
+        if !matches_pattern(&file_name, pattern) {
+            continue;
+        }
+
+        files.push(FileCandidate {
+            path: entry.path().to_string_lossy().to_string(),
+            modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+        });
+    }
+
+    files.sort_by(|left, right| {
+        left.modified
+            .cmp(&right.modified)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    Ok(files)
+}
+
+fn matches_pattern(file_name: &str, pattern: &str) -> bool {
+    let file_name = file_name.to_ascii_lowercase();
+    let pattern = pattern.to_ascii_lowercase();
+
+    if pattern == "*" {
+        return true;
+    }
+
+    if let Some((prefix, suffix)) = pattern.split_once('*') {
+        return file_name.starts_with(prefix) && file_name.ends_with(suffix);
+    }
+
+    file_name == pattern
+}
+
+fn canonical_directory(value: &str) -> anyhow::Result<PathBuf> {
+    let value = value.trim();
+
+    if value.is_empty() {
+        bail!("directory_path must not be empty");
+    }
+
+    let path = fs::canonicalize(value)
+        .with_context(|| format!("CSV directory `{value}` does not exist or is not readable"))?;
+
+    if !path.is_dir() {
+        bail!("CSV directory `{value}` is not a directory");
+    }
+
+    fs::read_dir(&path)
+        .with_context(|| format!("CSV directory `{}` is not readable", path.display()))?;
+    Ok(path)
+}
+
+fn read_header(path: &Path) -> anyhow::Result<Option<(String, usize)>> {
+    let bytes = fs::read(path)
+        .with_context(|| format!("failed to read CSV header from `{}`", path.display()))?;
+    let Some(newline_index) = bytes.iter().position(|byte| *byte == b'\n') else {
+        return Ok(None);
+    };
+    let mut header_bytes = &bytes[..newline_index];
+
+    if header_bytes.ends_with(b"\r") {
+        header_bytes = &header_bytes[..header_bytes.len() - 1];
+    }
+
+    if header_bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        header_bytes = &header_bytes[3..];
+    }
+
+    let header = std::str::from_utf8(header_bytes)
+        .context("CSV header must be UTF-8")?
+        .trim()
+        .to_string();
+    let columns = header.split(';').map(str::trim).collect::<Vec<_>>();
+
+    if !columns.contains(&"TARIH SAAT") || columns.len() < 2 {
+        bail!(
+            "CSV `{}` must contain `TARIH SAAT` and at least one measurement channel",
+            path.display()
+        );
+    }
+
+    Ok(Some((header, newline_index + 1)))
+}
+
+fn read_new_bytes(path: &Path, offset: u64) -> anyhow::Result<Vec<u8>> {
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(offset))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn complete_prefix_len(bytes: &[u8], accept_eof: bool) -> usize {
+    if accept_eof {
+        return bytes.len();
+    }
+
+    bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map(|index| index + 1)
+        .unwrap_or(0)
+}
+
+fn file_name(file_path: &str) -> anyhow::Result<String> {
+    Path::new(file_path)
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .ok_or_else(|| anyhow!("CSV path `{file_path}` has no file name"))
+}
+
+fn non_empty(value: String, label: &str) -> anyhow::Result<String> {
+    let value = value.trim().to_string();
+
+    if value.is_empty() {
+        bail!("{label} must not be empty");
+    }
+
+    Ok(value)
+}
+
+fn now() -> String {
+    Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+}

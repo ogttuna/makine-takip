@@ -16,15 +16,18 @@ import type {
 } from "echarts";
 import type { ComposeOption, EChartsType } from "echarts/core";
 import { CanvasRenderer } from "echarts/renderers";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { QualityEvent, SampleFrame } from "./api";
 import {
+  channelColor,
+  channelLabel,
   getChannelConfig,
   SHELF_AVERAGE_CHANNEL,
   SHELF_CHANNELS,
   sortChannels,
 } from "./channelConfig";
+import type { Locale } from "./i18n";
 
 type TelemetryChartProps = {
   samples: SampleFrame[];
@@ -33,6 +36,7 @@ type TelemetryChartProps = {
   variant?: "large" | "compact";
   showSlider?: boolean;
   themeMode?: "light" | "dark";
+  locale?: Locale;
 };
 
 type TelemetryChartOption = ComposeOption<
@@ -65,6 +69,10 @@ type TooltipDatumParam = {
   value?: unknown;
 };
 
+type LegendSelectChangedEvent = {
+  selected?: Record<string, boolean>;
+};
+
 type ChartPalette = {
   axisLine: string;
   axisText: string;
@@ -81,6 +89,9 @@ type ChartPalette = {
   zoomAccent: string;
 };
 
+const CHART_FONT_FAMILY =
+  'Bahnschrift, "DIN Alternate", "DIN 2014", Aptos, "Aptos Display", "IBM Plex Sans", "Noto Sans", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif';
+
 echarts.use([
   CanvasRenderer,
   DataZoomComponent,
@@ -92,6 +103,7 @@ echarts.use([
 ]);
 
 export function TelemetryChart({
+  locale = "tr",
   samples,
   qualityEvents,
   showSlider = true,
@@ -101,9 +113,10 @@ export function TelemetryChart({
 }: TelemetryChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<EChartsType | null>(null);
+  const [legendSelection, setLegendSelection] = useState<Record<string, boolean>>({});
   const series = useMemo(
-    () => buildSeries(samples, qualityEvents, visibleChannels, themeMode),
-    [qualityEvents, samples, themeMode, visibleChannels],
+    () => buildSeries(samples, qualityEvents, visibleChannels, themeMode, locale),
+    [locale, qualityEvents, samples, themeMode, visibleChannels],
   );
 
   useEffect(() => {
@@ -124,6 +137,28 @@ export function TelemetryChart({
       resizeObserver.disconnect();
       chartRef.current?.dispose();
       chartRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+
+    if (!chart) {
+      return;
+    }
+
+    const handleLegendSelect = (event: unknown) => {
+      const legendEvent = legendSelectEventFrom(event);
+
+      if (legendEvent?.selected) {
+        setLegendSelection(legendEvent.selected);
+      }
+    };
+
+    chart.on("legendselectchanged", handleLegendSelect);
+
+    return () => {
+      chart.off("legendselectchanged", handleLegendSelect);
     };
   }, []);
 
@@ -181,10 +216,12 @@ export function TelemetryChart({
         left: 56,
         right: 56,
         height: compact ? 36 : 56,
+        selected: legendSelection,
         textStyle: {
           color: palette.legendText,
-          fontFamily: "Inter, system-ui, sans-serif",
+          fontFamily: CHART_FONT_FAMILY,
           fontSize: compact ? 11 : 12,
+          fontWeight: 700,
         },
       },
       tooltip: {
@@ -201,9 +238,11 @@ export function TelemetryChart({
         },
         backgroundColor: palette.tooltipBackground,
         borderColor: palette.tooltipBorder,
-        formatter: formatTooltip,
+        formatter: (params) => formatTooltip(params, locale),
         textStyle: {
           color: palette.tooltipText,
+          fontFamily: CHART_FONT_FAMILY,
+          fontWeight: 600,
         },
       },
       dataZoom,
@@ -211,7 +250,9 @@ export function TelemetryChart({
         type: "time",
         axisLabel: {
           color: palette.axisText,
-          formatter: formatAxisTime,
+          fontFamily: CHART_FONT_FAMILY,
+          fontWeight: 600,
+          formatter: (value) => formatAxisTime(value, locale),
           hideOverlap: true,
         },
         axisLine: {
@@ -225,7 +266,7 @@ export function TelemetryChart({
     };
 
     chartRef.current.setOption(option, true);
-  }, [series, showSlider, themeMode, variant]);
+  }, [legendSelection, locale, series, showSlider, themeMode, variant]);
 
   return (
     <div
@@ -235,11 +276,26 @@ export function TelemetryChart({
   );
 }
 
+function legendSelectEventFrom(event: unknown): LegendSelectChangedEvent | null {
+  if (!event || typeof event !== "object" || !("selected" in event)) {
+    return null;
+  }
+
+  const selected = (event as { selected?: unknown }).selected;
+
+  if (!selected || typeof selected !== "object" || Array.isArray(selected)) {
+    return null;
+  }
+
+  return { selected: selected as Record<string, boolean> };
+}
+
 function buildSeries(
   samples: SampleFrame[],
   qualityEvents: QualityEvent[],
   visibleChannels: string[],
   themeMode: "light" | "dark",
+  locale: Locale,
 ): {
   colors: string[];
   series: Array<LineSeriesOption | ScatterSeriesOption>;
@@ -247,8 +303,9 @@ function buildSeries(
 } {
   const channels = sortChannels(visibleChannels);
   const palette = chartPalette(themeMode);
-  const axisLayout = buildAxisLayout(channels, palette);
-  const colors = channels.map((channel) => getChannelConfig(channel).color);
+  const axisLayout = buildAxisLayout(channels, palette, locale);
+  const colors = channels.map((channel) => channelColor(channel, themeMode));
+  const suspectLabel = locale === "en" ? "suspect" : "şüpheli";
   const eventByFrameChannel = new Set(
     qualityEvents
       .filter((event) => event.event_type === "suspect_value" && event.frame_id && event.channel_code)
@@ -258,22 +315,23 @@ function buildSeries(
 
   for (const channel of channels) {
     const config = getChannelConfig(channel);
+    const color = channelColor(channel, themeMode);
 
     if (channel === SHELF_AVERAGE_CHANNEL) {
       result.push({
-        name: seriesName(config),
+        name: seriesName(channel, locale),
         type: "line",
         yAxisIndex: axisIndexFor(axisLayout, config.axis),
         showSymbol: false,
         smooth: 0.15,
         connectNulls: false,
         lineStyle: {
-          color: config.color,
+          color,
           width: 2.4,
           type: "dashed",
         },
         itemStyle: {
-          color: config.color,
+          color,
         },
         emphasis: {
           disabled: true,
@@ -320,7 +378,7 @@ function buildSeries(
         suspectData.push({
           value: [timestamp, markerValue ?? measurement.numeric_value],
           rawText: measurement.raw_text,
-          displayValue: `${measurement.raw_text} şüpheli`,
+          displayValue: `${measurement.raw_text} ${suspectLabel}`,
         });
         continue;
       }
@@ -332,17 +390,17 @@ function buildSeries(
     }
 
     result.push({
-      name: seriesName(config),
+      name: seriesName(channel, locale),
       type: "line",
       yAxisIndex: axisIndexFor(axisLayout, config.axis),
       showSymbol: false,
       smooth: 0.15,
       connectNulls: false,
       lineStyle: {
-        color: config.color,
+        color,
       },
       itemStyle: {
-        color: config.color,
+        color,
       },
       emphasis: {
         disabled: true,
@@ -352,7 +410,7 @@ function buildSeries(
 
     if (suspectData.length > 0) {
       result.push({
-        name: `${seriesName(config)} şüpheli`,
+        name: `${seriesName(channel, locale)} ${suspectLabel}`,
         type: "scatter",
         yAxisIndex: axisIndexFor(axisLayout, config.axis),
         symbol: "diamond",
@@ -365,7 +423,7 @@ function buildSeries(
           disabled: true,
         },
         tooltip: {
-          valueFormatter: (_value) => "şüpheli",
+          valueFormatter: (_value) => suspectLabel,
         },
       });
     }
@@ -374,7 +432,11 @@ function buildSeries(
   return { colors, series: result, yAxis: axisLayout.yAxis };
 }
 
-function buildAxisLayout(channels: string[], palette: ChartPalette): AxisLayout {
+function buildAxisLayout(
+  channels: string[],
+  palette: ChartPalette,
+  locale: Locale,
+): AxisLayout {
   const axisKinds = new Set<AxisKind>(
     channels.map((channel) => getChannelConfig(channel).axis),
   );
@@ -386,10 +448,17 @@ function buildAxisLayout(channels: string[], palette: ChartPalette): AxisLayout 
     indexByKind.main = yAxis.length;
     yAxis.push({
       type: "value",
-      name: "Değer",
+      name: locale === "en" ? "Value" : "Değer",
+      nameTextStyle: {
+        color: palette.legendText,
+        fontFamily: CHART_FONT_FAMILY,
+        fontWeight: 700,
+      },
       position: "left",
       axisLabel: {
         color: palette.axisText,
+        fontFamily: CHART_FONT_FAMILY,
+        fontWeight: 600,
       },
       splitLine: {
         lineStyle: {
@@ -403,11 +472,18 @@ function buildAxisLayout(channels: string[], palette: ChartPalette): AxisLayout 
     indexByKind.vacuum = yAxis.length;
     yAxis.push({
       type: "log",
-      name: "Vacum",
+      name: locale === "en" ? "Vacuum" : "Vakum",
+      nameTextStyle: {
+        color: palette.legendText,
+        fontFamily: CHART_FONT_FAMILY,
+        fontWeight: 700,
+      },
       min: 0.000_001,
       position: includeMainAxis ? "right" : "left",
       axisLabel: {
         color: palette.axisText,
+        fontFamily: CHART_FONT_FAMILY,
+        fontWeight: 600,
       },
       splitLine: {
         show: !includeMainAxis,
@@ -424,36 +500,36 @@ function buildAxisLayout(channels: string[], palette: ChartPalette): AxisLayout 
 function chartPalette(themeMode: "light" | "dark"): ChartPalette {
   if (themeMode === "dark") {
     return {
-      axisLine: "#30433c",
-      axisText: "#92a69d",
-      danger: "#fb7185",
-      legendText: "#d7e4de",
-      pointer: "#8aa199",
-      sliderBorder: "#30433c",
-      sliderFill: "rgba(45, 212, 191, 0.18)",
-      sliderPreviewArea: "rgba(45, 212, 191, 0.1)",
-      splitLine: "#1f302b",
-      tooltipBackground: "rgba(10, 17, 16, 0.96)",
-      tooltipBorder: "#30433c",
-      tooltipText: "#d7e4de",
-      zoomAccent: "#2dd4bf",
+      axisLine: "#34383c",
+      axisText: "#a2a9ad",
+      danger: "#d10f16",
+      legendText: "#f1f4f0",
+      pointer: "#f2a11b",
+      sliderBorder: "#34383c",
+      sliderFill: "rgba(242, 161, 27, 0.18)",
+      sliderPreviewArea: "rgba(242, 161, 27, 0.08)",
+      splitLine: "#25292d",
+      tooltipBackground: "rgba(10, 11, 12, 0.98)",
+      tooltipBorder: "#454a50",
+      tooltipText: "#f1f4f0",
+      zoomAccent: "#f2a11b",
     };
   }
 
   return {
-    axisLine: "#c7d0db",
-    axisText: "#607089",
-    danger: "#b91c1c",
-    legendText: "#334155",
-    pointer: "#8b9aad",
-    sliderBorder: "#c7d0db",
-    sliderFill: "rgba(0, 125, 121, 0.14)",
-    sliderPreviewArea: "rgba(0, 125, 121, 0.08)",
-    splitLine: "#dde4ec",
-    tooltipBackground: "rgba(255, 255, 255, 0.96)",
-    tooltipBorder: "#c7d0db",
-    tooltipText: "#334155",
-    zoomAccent: "#007d79",
+    axisLine: "#aeb8c0",
+    axisText: "#5f6971",
+    danger: "#b51d22",
+    legendText: "#34424c",
+    pointer: "#c97913",
+    sliderBorder: "#aeb8c0",
+    sliderFill: "rgba(201, 121, 19, 0.16)",
+    sliderPreviewArea: "rgba(201, 121, 19, 0.08)",
+    splitLine: "#c9d1d7",
+    tooltipBackground: "rgba(241, 243, 242, 0.98)",
+    tooltipBorder: "#aeb8c0",
+    tooltipText: "#101315",
+    zoomAccent: "#c97913",
   };
 }
 
@@ -461,8 +537,10 @@ function axisIndexFor(axisLayout: AxisLayout, axis: AxisKind): number {
   return axisLayout.indexByKind[axis] ?? axisLayout.indexByKind.main ?? 0;
 }
 
-function seriesName(config: ReturnType<typeof getChannelConfig>): string {
-  return config.unit ? `${config.label} (${config.unit})` : config.label;
+function seriesName(channel: string, locale: Locale): string {
+  const config = getChannelConfig(channel);
+  const label = channelLabel(channel, locale);
+  return config.unit ? `${label} (${config.unit})` : label;
 }
 
 function shelfAverageLineData(
@@ -517,7 +595,10 @@ function shelfAverageLineData(
   return lineData;
 }
 
-function formatTooltip(params: TooltipComponentFormatterCallbackParams): string {
+function formatTooltip(
+  params: TooltipComponentFormatterCallbackParams,
+  locale: Locale,
+): string {
   const items = (Array.isArray(params) ? params : [params])
     .map((item) => item as TooltipDatumParam)
     .map((item) => {
@@ -539,12 +620,15 @@ function formatTooltip(params: TooltipComponentFormatterCallbackParams): string 
   }
 
   return [
-    `<div class="chart-tooltip-title">${escapeHtml(tooltipTitle(params))}</div>`,
+    `<div class="chart-tooltip-title">${escapeHtml(tooltipTitle(params, locale))}</div>`,
     ...items,
   ].join("");
 }
 
-function tooltipTitle(params: TooltipComponentFormatterCallbackParams): string {
+function tooltipTitle(
+  params: TooltipComponentFormatterCallbackParams,
+  locale: Locale,
+): string {
   const first = (Array.isArray(params) ? params[0] : params) as
     | TooltipDatumParam
     | undefined;
@@ -554,7 +638,24 @@ function tooltipTitle(params: TooltipComponentFormatterCallbackParams): string {
   }
 
   const value = Array.isArray(first.value) ? first.value[0] : first.axisValue;
-  return value === undefined || value === null ? "" : String(value);
+
+  if (value === undefined || value === null) {
+    return "";
+  }
+
+  const timestamp = typeof value === "number" ? value : Date.parse(String(value));
+
+  if (!Number.isFinite(timestamp)) {
+    return String(value);
+  }
+
+  return new Intl.DateTimeFormat(locale === "en" ? "en-US" : "tr-TR", {
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).format(new Date(timestamp));
 }
 
 function tooltipDisplayValue(item: TooltipDatumParam): string | null {
@@ -600,14 +701,14 @@ function escapeHtml(value: string): string {
     .replace(/'/g, "&#39;");
 }
 
-function formatAxisTime(value: number | string): string {
+function formatAxisTime(value: number | string, locale: Locale): string {
   const timestamp = typeof value === "number" ? value : Date.parse(value);
 
   if (!Number.isFinite(timestamp)) {
     return String(value);
   }
 
-  return new Intl.DateTimeFormat("tr-TR", {
+  return new Intl.DateTimeFormat(locale === "en" ? "en-US" : "tr-TR", {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(timestamp));

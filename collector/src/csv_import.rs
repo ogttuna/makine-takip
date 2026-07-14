@@ -66,7 +66,7 @@ pub enum ValueType {
 }
 
 impl ValueType {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Number => "number",
             Self::Text => "text",
@@ -82,7 +82,7 @@ pub enum MeasurementQuality {
 }
 
 impl MeasurementQuality {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Good => "good",
             Self::Suspect => "suspect",
@@ -189,10 +189,13 @@ pub fn parse_csv_bytes(file_name: impl Into<String>, bytes: &[u8]) -> anyhow::Re
                 .map(str::trim)
                 .unwrap_or_default()
                 .to_string();
-            let parsed_value = raw_text.parse::<f64>();
+            let parsed_value = raw_text
+                .parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite());
             let (numeric_value, value_text, value_type, quality, quality_reason) =
                 match parsed_value {
-                    Ok(value) => {
+                    Some(value) => {
                         if channel_code == "RAF3" && (value - 850.0).abs() < 0.000_001 {
                             warning_count += 1;
                             quality_events.push(ParsedQualityEvent {
@@ -228,7 +231,7 @@ pub fn parse_csv_bytes(file_name: impl Into<String>, bytes: &[u8]) -> anyhow::Re
                             )
                         }
                     }
-                    Err(_) => {
+                    None => {
                         error_count += 1;
                         quality_events.push(ParsedQualityEvent {
                             source_row_number,

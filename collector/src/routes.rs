@@ -1,18 +1,21 @@
-use axum::extract::{Multipart, Path, State};
+use axum::extract::{Multipart, Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Row, SqlitePool};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::csv_import::{ImportReport, import_csv_bytes};
+use crate::csv_tail::{CsvTailConfigRequest, CsvTailManager, CsvTailStatus};
+use crate::ingest::{AppendSamplesReport, AppendSamplesRequest, CreateRunRequest};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct AppState {
     pool: SqlitePool,
+    csv_tail: CsvTailManager,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,6 +51,22 @@ struct RunsResponse {
     runs: Vec<RunSummary>,
 }
 
+#[derive(Debug, Deserialize)]
+struct SamplesQuery {
+    from: Option<String>,
+    to: Option<String>,
+    limit: Option<i64>,
+    latest: Option<i64>,
+    after_sequence: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateRunStatusRequest {
+    status: String,
+    finished_at: Option<String>,
+    notes: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct SamplesResponse {
     samples: Vec<SampleFrameResponse>,
@@ -78,6 +97,16 @@ struct QualityEventsResponse {
     events: Vec<QualityEventResponse>,
 }
 
+#[derive(Debug, Serialize)]
+struct StateObservationsResponse {
+    observations: Vec<StateObservationResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct StateSegmentsResponse {
+    segments: Vec<StateSegmentResponse>,
+}
+
 #[derive(Debug, Serialize, FromRow)]
 struct QualityEventResponse {
     id: i64,
@@ -89,6 +118,33 @@ struct QualityEventResponse {
     event_type: String,
     severity: String,
     message: String,
+    metadata_json: Option<String>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+struct StateObservationResponse {
+    id: i64,
+    frame_id: Option<i64>,
+    sampled_at: String,
+    source_sequence: i64,
+    source_recipe_code: Option<String>,
+    source_recipe_version: Option<String>,
+    source_state_code: String,
+    source_state_name: Option<String>,
+    source_payload_json: Option<String>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+struct StateSegmentResponse {
+    id: i64,
+    run_recipe_assignment_id: i64,
+    recipe_state_id: Option<i64>,
+    recipe_state_code: Option<String>,
+    recipe_state_name: Option<String>,
+    started_at: String,
+    finished_at: Option<String>,
+    source: String,
+    confidence: Option<f64>,
     metadata_json: Option<String>,
 }
 
@@ -108,17 +164,38 @@ struct SampleMeasurementRow {
 }
 
 pub fn router(pool: SqlitePool) -> Router {
-    let state = AppState { pool };
+    let csv_tail = CsvTailManager::new(pool.clone());
+    router_with_csv_tail(pool, csv_tail)
+}
+
+pub fn router_with_csv_tail(pool: SqlitePool, csv_tail: CsvTailManager) -> Router {
+    let state = AppState { pool, csv_tail };
     let static_files = ServeDir::new("dist").fallback(ServeFile::new("dist/index.html"));
 
     Router::new()
         .route("/api/health", get(health))
         .route("/api/live", get(live))
+        .route(
+            "/api/csv-tail",
+            get(csv_tail_status).put(configure_csv_tail),
+        )
+        .route("/api/csv-tail/start", post(start_csv_tail))
+        .route("/api/csv-tail/stop", post(stop_csv_tail))
+        .route("/api/csv-tail/rescan", post(rescan_csv_tail))
         .route("/api/imports/csv", post(import_csv))
         .route("/api/imports/{id}", get(import_status))
-        .route("/api/runs", get(runs))
+        .route("/api/runs", get(runs).post(create_run))
         .route("/api/runs/{id}", get(run_detail))
-        .route("/api/runs/{id}/samples", get(run_samples))
+        .route("/api/runs/{id}/status", patch(update_run_status))
+        .route(
+            "/api/runs/{id}/samples",
+            get(run_samples).post(append_run_samples),
+        )
+        .route(
+            "/api/runs/{id}/state-observations",
+            get(run_state_observations),
+        )
+        .route("/api/runs/{id}/state-segments", get(run_state_segments))
         .route("/api/runs/{id}/quality-events", get(run_quality_events))
         .route("/api/runs/{id}/export.csv", get(export_run_csv))
         .fallback_service(static_files)
@@ -141,6 +218,39 @@ async fn live() -> Json<LegacyLiveSnapshot> {
         active_run: None,
         samples: Vec::new(),
     })
+}
+
+async fn csv_tail_status(State(state): State<AppState>) -> Result<Json<CsvTailStatus>, ApiError> {
+    Ok(Json(state.csv_tail.status().await?))
+}
+
+async fn configure_csv_tail(
+    State(state): State<AppState>,
+    Json(request): Json<CsvTailConfigRequest>,
+) -> Result<Json<CsvTailStatus>, ApiError> {
+    let status = state
+        .csv_tail
+        .configure(request)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(status))
+}
+
+async fn start_csv_tail(State(state): State<AppState>) -> Result<Json<CsvTailStatus>, ApiError> {
+    let status = state
+        .csv_tail
+        .start()
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(status))
+}
+
+async fn stop_csv_tail(State(state): State<AppState>) -> Result<Json<CsvTailStatus>, ApiError> {
+    Ok(Json(state.csv_tail.stop().await?))
+}
+
+async fn rescan_csv_tail(State(state): State<AppState>) -> Result<Json<CsvTailStatus>, ApiError> {
+    Ok(Json(state.csv_tail.rescan().await?))
 }
 
 async fn import_csv(
@@ -233,12 +343,32 @@ async fn runs(State(state): State<AppState>) -> Result<Json<RunsResponse>, ApiEr
             r.started_at,
             r.finished_at,
             r.status,
-            COALESCE(i.row_count, 0) AS row_count,
-            COALESCE(i.warning_count, 0) AS warning_count,
-            COALESCE(i.error_count, 0) AS error_count
+            COALESCE(
+                i.row_count,
+                (SELECT COUNT(*) FROM sample_frames f WHERE f.run_id = r.id),
+                0
+            ) AS row_count,
+            COALESCE(
+                i.warning_count,
+                (
+                    SELECT COUNT(*)
+                    FROM quality_events q
+                    WHERE q.run_id = r.id AND q.severity = 'warning'
+                ),
+                0
+            ) AS warning_count,
+            COALESCE(
+                i.error_count,
+                (
+                    SELECT COUNT(*)
+                    FROM quality_events q
+                    WHERE q.run_id = r.id AND q.severity = 'error'
+                ),
+                0
+            ) AS error_count
         FROM runs r
         LEFT JOIN import_files i ON i.run_id = r.id
-        ORDER BY r.started_at DESC, r.id DESC
+        ORDER BY COALESCE(r.started_at, r.created_at) DESC, r.id DESC
         LIMIT 100
         "#,
     )
@@ -246,6 +376,18 @@ async fn runs(State(state): State<AppState>) -> Result<Json<RunsResponse>, ApiEr
     .await?;
 
     Ok(Json(RunsResponse { runs }))
+}
+
+async fn create_run(
+    State(state): State<AppState>,
+    Json(request): Json<CreateRunRequest>,
+) -> Result<Json<RunSummary>, ApiError> {
+    let run_id = crate::ingest::create_run(&state.pool, request)
+        .await
+        .map_err(ApiError::bad_request)?;
+    let run = fetch_run_summary(&state.pool, run_id).await?;
+
+    Ok(Json(run))
 }
 
 async fn run_detail(
@@ -262,9 +404,29 @@ async fn run_detail(
             r.started_at,
             r.finished_at,
             r.status,
-            COALESCE(i.row_count, 0) AS row_count,
-            COALESCE(i.warning_count, 0) AS warning_count,
-            COALESCE(i.error_count, 0) AS error_count
+            COALESCE(
+                i.row_count,
+                (SELECT COUNT(*) FROM sample_frames f WHERE f.run_id = r.id),
+                0
+            ) AS row_count,
+            COALESCE(
+                i.warning_count,
+                (
+                    SELECT COUNT(*)
+                    FROM quality_events q
+                    WHERE q.run_id = r.id AND q.severity = 'warning'
+                ),
+                0
+            ) AS warning_count,
+            COALESCE(
+                i.error_count,
+                (
+                    SELECT COUNT(*)
+                    FROM quality_events q
+                    WHERE q.run_id = r.id AND q.severity = 'error'
+                ),
+                0
+            ) AS error_count
         FROM runs r
         LEFT JOIN import_files i ON i.run_id = r.id
         WHERE r.id = ?1
@@ -285,9 +447,57 @@ async fn run_detail(
 async fn run_samples(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    Query(query): Query<SamplesQuery>,
 ) -> Result<Json<SamplesResponse>, ApiError> {
+    let from = query
+        .from
+        .as_deref()
+        .map(crate::ingest::normalize_timestamp)
+        .transpose()
+        .map_err(ApiError::bad_request)?;
+    let to = query
+        .to
+        .as_deref()
+        .map(crate::ingest::normalize_timestamp)
+        .transpose()
+        .map_err(ApiError::bad_request)?;
+    if query.latest.is_some() && query.after_sequence.is_some() {
+        return Err(ApiError::bad_request(anyhow::anyhow!(
+            "latest and after_sequence cannot be used together"
+        )));
+    }
+
+    if query.after_sequence.is_some_and(|sequence| sequence < 0) {
+        return Err(ApiError::bad_request(anyhow::anyhow!(
+            "after_sequence must not be negative"
+        )));
+    }
+
+    let limit = query.latest.or(query.limit).unwrap_or(5_000);
+
+    if !(1..=50_000).contains(&limit) {
+        return Err(ApiError::bad_request(anyhow::anyhow!(
+            "sample limit must be between 1 and 50000"
+        )));
+    }
+
     let rows = sqlx::query_as::<_, SampleMeasurementRow>(
         r#"
+        WITH filtered_frames AS (
+            SELECT id
+            FROM sample_frames
+            WHERE
+                run_id = ?1
+                AND (?2 IS NULL OR sampled_at >= ?2)
+                AND (?3 IS NULL OR sampled_at <= ?3)
+                AND (?4 IS NULL OR source_row_number > ?4)
+            ORDER BY
+                CASE WHEN ?5 = 1 THEN sampled_at END DESC,
+                CASE WHEN ?5 = 1 THEN source_row_number END DESC,
+                CASE WHEN ?5 = 0 THEN sampled_at END ASC,
+                CASE WHEN ?5 = 0 THEN source_row_number END ASC
+            LIMIT ?6
+        )
         SELECT
             f.id AS frame_id,
             f.sampled_at,
@@ -303,11 +513,16 @@ async fn run_samples(
         FROM sample_frames f
         JOIN measurements m ON m.frame_id = f.id
         JOIN channels c ON c.id = m.channel_id
-        WHERE f.run_id = ?1
+        JOIN filtered_frames ff ON ff.id = f.id
         ORDER BY f.sampled_at ASC, f.source_row_number ASC, c.id ASC
         "#,
     )
     .bind(id)
+    .bind(from)
+    .bind(to)
+    .bind(query.after_sequence)
+    .bind(i64::from(query.latest.is_some()))
+    .bind(limit)
     .fetch_all(&state.pool)
     .await?;
 
@@ -345,6 +560,72 @@ async fn run_samples(
     Ok(Json(SamplesResponse { samples }))
 }
 
+async fn update_run_status(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(request): Json<UpdateRunStatusRequest>,
+) -> Result<Json<RunSummary>, ApiError> {
+    let status = request.status.trim();
+
+    if !matches!(
+        status,
+        "imported" | "running" | "completed" | "aborted" | "failed"
+    ) {
+        return Err(ApiError::bad_request(anyhow::anyhow!(
+            "unsupported run status `{status}`"
+        )));
+    }
+
+    let finished_at = match request.finished_at.as_deref() {
+        Some(value) => {
+            Some(crate::ingest::normalize_timestamp(value).map_err(ApiError::bad_request)?)
+        }
+        None if matches!(status, "completed" | "aborted" | "failed") => {
+            Some(latest_sampled_at_or_now(&state.pool, id).await?)
+        }
+        None => None,
+    };
+
+    let result = sqlx::query(
+        r#"
+        UPDATE runs
+        SET
+            status = ?2,
+            finished_at = ?3,
+            notes = COALESCE(?4, notes)
+        WHERE id = ?1
+        "#,
+    )
+    .bind(id)
+    .bind(status)
+    .bind(finished_at)
+    .bind(request.notes)
+    .execute(&state.pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(ApiError::not_found(anyhow::anyhow!(
+            "run {id} was not found"
+        )));
+    }
+
+    let run = fetch_run_summary(&state.pool, id).await?;
+
+    Ok(Json(run))
+}
+
+async fn append_run_samples(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(request): Json<AppendSamplesRequest>,
+) -> Result<Json<AppendSamplesReport>, ApiError> {
+    let report = crate::ingest::append_samples(&state.pool, id, request)
+        .await
+        .map_err(ApiError::bad_request)?;
+
+    Ok(Json(report))
+}
+
 async fn run_quality_events(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -374,6 +655,121 @@ async fn run_quality_events(
     .await?;
 
     Ok(Json(QualityEventsResponse { events }))
+}
+
+async fn run_state_observations(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Query(query): Query<SamplesQuery>,
+) -> Result<Json<StateObservationsResponse>, ApiError> {
+    let from = query
+        .from
+        .as_deref()
+        .map(crate::ingest::normalize_timestamp)
+        .transpose()
+        .map_err(ApiError::bad_request)?;
+    let to = query
+        .to
+        .as_deref()
+        .map(crate::ingest::normalize_timestamp)
+        .transpose()
+        .map_err(ApiError::bad_request)?;
+    let limit = query.limit.unwrap_or(5_000);
+
+    if !(1..=50_000).contains(&limit) {
+        return Err(ApiError::bad_request(anyhow::anyhow!(
+            "state observation limit must be between 1 and 50000"
+        )));
+    }
+
+    let observations = sqlx::query_as::<_, StateObservationResponse>(
+        r#"
+        SELECT
+            id,
+            frame_id,
+            sampled_at,
+            source_sequence,
+            source_recipe_code,
+            source_recipe_version,
+            source_state_code,
+            source_state_name,
+            source_payload_json
+        FROM run_state_observations
+        WHERE
+            run_id = ?1
+            AND (?2 IS NULL OR sampled_at >= ?2)
+            AND (?3 IS NULL OR sampled_at <= ?3)
+        ORDER BY sampled_at ASC, source_sequence ASC, id ASC
+        LIMIT ?4
+        "#,
+    )
+    .bind(id)
+    .bind(from)
+    .bind(to)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await?;
+
+    Ok(Json(StateObservationsResponse { observations }))
+}
+
+async fn run_state_segments(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Query(query): Query<SamplesQuery>,
+) -> Result<Json<StateSegmentsResponse>, ApiError> {
+    let from = query
+        .from
+        .as_deref()
+        .map(crate::ingest::normalize_timestamp)
+        .transpose()
+        .map_err(ApiError::bad_request)?;
+    let to = query
+        .to
+        .as_deref()
+        .map(crate::ingest::normalize_timestamp)
+        .transpose()
+        .map_err(ApiError::bad_request)?;
+    let limit = query.limit.unwrap_or(1_000);
+
+    if !(1..=10_000).contains(&limit) {
+        return Err(ApiError::bad_request(anyhow::anyhow!(
+            "state segment limit must be between 1 and 10000"
+        )));
+    }
+
+    let segments = sqlx::query_as::<_, StateSegmentResponse>(
+        r#"
+        SELECT
+            s.id,
+            s.run_recipe_assignment_id,
+            s.recipe_state_id,
+            rs.code AS recipe_state_code,
+            rs.display_name AS recipe_state_name,
+            s.started_at,
+            s.finished_at,
+            s.source,
+            s.confidence,
+            s.metadata_json
+        FROM run_state_segments s
+        JOIN run_recipe_assignments a ON a.id = s.run_recipe_assignment_id
+        LEFT JOIN recipe_states rs ON rs.id = s.recipe_state_id
+        WHERE
+            a.run_id = ?1
+            AND (?2 IS NULL OR COALESCE(s.finished_at, s.started_at) >= ?2)
+            AND (?3 IS NULL OR s.started_at <= ?3)
+        ORDER BY s.started_at ASC, s.id ASC
+        LIMIT ?4
+        "#,
+    )
+    .bind(id)
+    .bind(from)
+    .bind(to)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await?;
+
+    Ok(Json(StateSegmentsResponse { segments }))
 }
 
 async fn export_run_csv(
@@ -491,9 +887,29 @@ async fn fetch_run_summary(pool: &SqlitePool, id: i64) -> Result<RunSummary, Api
             r.started_at,
             r.finished_at,
             r.status,
-            COALESCE(i.row_count, 0) AS row_count,
-            COALESCE(i.warning_count, 0) AS warning_count,
-            COALESCE(i.error_count, 0) AS error_count
+            COALESCE(
+                i.row_count,
+                (SELECT COUNT(*) FROM sample_frames f WHERE f.run_id = r.id),
+                0
+            ) AS row_count,
+            COALESCE(
+                i.warning_count,
+                (
+                    SELECT COUNT(*)
+                    FROM quality_events q
+                    WHERE q.run_id = r.id AND q.severity = 'warning'
+                ),
+                0
+            ) AS warning_count,
+            COALESCE(
+                i.error_count,
+                (
+                    SELECT COUNT(*)
+                    FROM quality_events q
+                    WHERE q.run_id = r.id AND q.severity = 'error'
+                ),
+                0
+            ) AS error_count
         FROM runs r
         LEFT JOIN import_files i ON i.run_id = r.id
         WHERE r.id = ?1
@@ -509,6 +925,23 @@ async fn fetch_run_summary(pool: &SqlitePool, id: i64) -> Result<RunSummary, Api
     };
 
     Ok(run)
+}
+
+async fn latest_sampled_at_or_now(pool: &SqlitePool, run_id: i64) -> Result<String, ApiError> {
+    let sampled_at = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT sampled_at
+        FROM sample_frames
+        WHERE run_id = ?1
+        ORDER BY sampled_at DESC, id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(sampled_at.unwrap_or_else(|| Utc::now().format("%Y-%m-%dT%H:%M:%S%.3f").to_string()))
 }
 
 #[derive(Debug)]

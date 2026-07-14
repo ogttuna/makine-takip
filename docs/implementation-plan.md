@@ -137,7 +137,7 @@ Bir CSV importu veya canli kayit oturumu.
 ```text
 id
 name
-source_kind          -- csv_import, csv_tail, replay, live
+source_kind          -- csv_import, csv_tail, replay, http_push, webhook...
 source_name          -- dosya adi veya baglanti adi
 started_at
 finished_at
@@ -237,6 +237,207 @@ Bu model genis tablo kadar basit degil, ama veri tipi ve kanal degisimlerine
 daha hazir. Yine de mikroservis veya time-series database seviyesinde
 overengineering sayilmaz.
 
+## Recete ve Proses State Stratejisi
+
+Ileride recete yapisi eklendiginde sistem sadece "grafikte veri gosterme"
+uygulamasi olmayacak; kosunun receteye gore hangi state/asamada oldugunu ve o
+state icin guvenli araliklarin disina cikilip cikilmadigini de yorumlayacak.
+
+Bu nedenle recete modeli telemetry modelinden ayri tutulmali:
+
+- `sample_frames` ve `measurements` ham zaman serisi gercegidir; recete
+  degisse bile bu veri yeniden yazilmaz.
+- Makineden gelen aktif recete/state/adim bilgisi de ham proses bilgisi olarak
+  saklanir; dogrudan bizim recete katalog tablolarina zorla map edilmez.
+- Recete, state ve guvenli araliklar yorum katmanidir; ayni run farkli recete
+  versiyonu veya farkli limit setiyle tekrar degerlendirilebilir.
+- Guvenli aralik ihlalleri `quality_events` icinde yeni event tipleri olarak
+  tutulabilir, ama ihlal kurali ve recete versiyonu metadata'da izlenebilir
+  olmalidir.
+
+Gelecekte eklenecek temel kavramlar:
+
+### `recipes`
+
+Recete katalog kaydi. Sistemde birden fazla recete olabilir.
+
+```text
+id
+name
+status              -- draft, active, archived
+description
+created_at
+```
+
+### `recipe_versions`
+
+Recetenin degismez versiyon snapshot'i. Limitler veya state akisi degisirse
+eski kosularin yorumu bozulmasin diye mevcut versiyon guncellenmez, yeni
+versiyon acilir.
+
+```text
+id
+recipe_id
+version
+status              -- draft, active, archived
+created_at
+notes
+```
+
+### `recipe_states`
+
+Recetenin proses state/asama tanimlari. Ornek: pre-freeze, primary drying,
+secondary drying, hold, vent.
+
+```text
+id
+recipe_version_id
+code
+display_name
+sort_order
+expected_duration_seconds
+transition_rule_json
+```
+
+Makineden gelen state kodlari bizim internal `code` degerimizle birebir ayni
+olmayabilir. Bu nedenle state taniminda ileride `external_code` veya
+`external_aliases_json` gibi esleme alanlari gerekebilir.
+
+### `recipe_channel_limits`
+
+Her state icin kanal bazli beklenen/guvenli araliklar.
+
+```text
+id
+recipe_state_id
+channel_code
+min_value
+max_value
+target_value
+warning_min
+warning_max
+alarm_min
+alarm_max
+unit
+rule_json
+```
+
+Basit araliklar kolonlarda tutulur; daha karmasik kosullar `rule_json` ile
+eklenir. Ilk uygulamada bu alanin sadece saklama ve gosterim icin kalmasi,
+kurallar netlesince degerlendirme motoruna baglanmasi daha dogru olur.
+
+### `run_recipe_assignments`
+
+Bir kosunun hangi recete versiyonu ile yorumlandigini tutar. Bir run icin
+birden fazla assignment olabilir; ornegin operatorun sectigi aktif recete,
+alternatif karsilastirma recetesi veya gecmis veriyi yeniden yorumlayan bir
+analiz seti. UI ilk etapta tek `primary` assignment'i gosterir, ama veri modeli
+coklu recete karsilastirmasina kapali kalmaz.
+
+```text
+id
+run_id
+recipe_version_id
+role                -- primary, candidate, comparison
+status              -- active, archived
+assigned_at
+```
+
+### `run_state_observations`
+
+Makineden, dosyadan veya dis kaynaktan gelen "su anda recetenin/adimin hangi
+state'indeyiz" bilgisinin ham kaydi. Bu tablo kaynak gercegini saklar; bizim
+recete katalog state'imizle eslesip eslesmemesi ayri bir yorum isidir.
+
+```text
+id
+run_id
+sampled_at
+source_sequence
+source_recipe_code
+source_recipe_version
+source_state_code
+source_state_name
+source_payload_json
+created_at
+```
+
+Bu bilgi ingest akisina olcumlerle beraber veya ayri state/event mesaji olarak
+gelebilir. Adapter once kaynak state bilgisini bu ham forma normalize eder.
+Sonra esleme kurallari uygunsa `run_state_segments` uretilir.
+
+### `run_state_segments`
+
+Run icinde hangi zaman araliginda hangi recete state'inin gecerli oldugunu
+tutar. Bu bilgi makineden gelebilir, operator tarafindan isaretlenebilir veya
+ileride otomatik state detection ile uretilebilir.
+
+```text
+id
+run_recipe_assignment_id
+recipe_state_id
+started_at
+finished_at
+source              -- machine, operator, inferred, replay
+confidence
+metadata_json
+```
+
+Makineden gelen state bilgisinden segment uretirken:
+
+- Ardarda ayni `source_state_code` geliyorsa segment uzatilir.
+- State kodu bilinen recete state'i ile eslesirse `recipe_state_id` dolar.
+- Eslesme yoksa ham observation korunur ve `state_unmapped` quality event'i
+  uretilebilir.
+- Makine state bilgisini hic gondermezse operator/inferred segment uretimi
+  daha sonra devreye girebilir.
+
+### Receteye gore kalite olaylari
+
+State bazli guvenli aralik disina cikma olaylari `quality_events` icinde
+asagidaki event tipleriyle baslayabilir:
+
+```text
+state_limit_warning
+state_limit_alarm
+state_missing
+state_unmapped
+state_transition_gap
+```
+
+`metadata_json` icinde en az sunlar tutulmali:
+
+```json
+{
+  "recipe_id": 1,
+  "recipe_version_id": 3,
+  "recipe_version": "1.0",
+  "run_recipe_assignment_id": 12,
+  "recipe_state_code": "primary_drying",
+  "channel_code": "RAF1",
+  "numeric_value": -18.4,
+  "warning_min": -35.0,
+  "warning_max": -20.0,
+  "alarm_min": -40.0,
+  "alarm_max": -10.0
+}
+```
+
+Grafik davranisi:
+
+- X ekseninde state segmentleri arka plan bandi veya ust zaman seridi olarak
+  gosterilebilir.
+- Her kanal icin secili state'in guvenli araligi cizgi/bant olarak
+  bindirilebilir.
+- Tooltip, olcum degerinin yaninda o anda aktif state'i ve limit araligini
+  gosterebilir.
+- Operator "bu state'te sinir disinda miyiz?" sorusuna grafikten cevap
+  alabilmeli.
+
+Bu kisim ilk CSV MVP'sinin icine zorla sokulmayacak. Ancak mevcut esnek
+measurement modeli ve `quality_events` yapisi bu recete/state yorum katmanina
+engel olmayacak sekilde korunacak.
+
 ## Veri Kalitesi Kurallari
 
 Ilk kural: ham veri silinmez.
@@ -304,7 +505,101 @@ Baslangicta sadece gerekli ayarlar:
 
 ## Canli Veri Stratejisi
 
-Gercek makine baglantisi netlesmeden Modbus/serial kodunu buyutmek gereksiz.
+Gercek makine baglantisi netlesmeden Modbus/serial, vendor TCP veya internet
+kaynagi kodunu UI/storage katmanina yaymak dogru degil. Canli veri icin
+collector icinde kaynak bagimsiz bir ingest siniri kullanilir.
+
+Mevcut ortak ingest modeli:
+
+```text
+POST /api/runs
+PATCH /api/runs/:id/status
+POST /api/runs/:id/samples
+GET /api/runs/:id/samples?from=...&to=...&limit=...
+GET /api/runs/:id/state-observations?from=...&to=...&limit=...
+GET /api/runs/:id/state-segments?from=...&to=...&limit=...
+```
+
+`POST /api/runs` yeni bir `running` kosu olusturur. `source_kind` serbest
+metindir; `csv_import`, `csv_tail`, `replay`, `http_push`, `webhook`,
+`modbus_tcp`, `serial` veya ureticiye ozel adapter isimleri kullanilabilir.
+Bu alan migration seviyesinde sabit enum degildir.
+
+`POST /api/runs/:id/samples` bir veya daha fazla sample ekler:
+
+```json
+{
+  "samples": [
+    {
+      "sampled_at": "2026-06-24T10:00:00.000",
+      "source_timestamp_text": "2026-06-24T10:00:00.000",
+      "source_sequence": 1,
+      "measurements": [
+        {
+          "channel_code": "RAF1",
+          "raw_text": "10.25",
+          "numeric_value": 10.25
+        }
+      ]
+    }
+  ]
+}
+```
+
+Makine aktif recete/state bilgisini de gonderiyorsa ayni kaynak adapteri bunu
+ayri bir `state_observation` olarak normalize etmelidir. Bu bilgi sensor
+kanali gibi `measurements` icine zorla sokulmaz; cunku "adim/state" zaman
+serisi olcumu degil, proses baglamidir.
+
+Ileride ingest payload'i su sekilde genisleyebilir:
+
+```json
+{
+  "samples": [
+    {
+      "sampled_at": "2026-06-24T10:00:00.000",
+      "source_sequence": 1,
+      "state_observation": {
+        "source_recipe_code": "FD_BASIC",
+        "source_recipe_version": "3",
+        "source_state_code": "PRIMARY_DRYING",
+        "source_state_name": "Primary Drying"
+      },
+      "measurements": [
+        {
+          "channel_code": "RAF1",
+          "raw_text": "10.25",
+          "numeric_value": 10.25
+        }
+      ]
+    }
+  ]
+}
+```
+
+Kurallar:
+
+- `source_sequence` ayni kosu icinde idempotency anahtaridir; tekrar gelen
+  sample atlanir.
+- Makine state bilgisi varsa ham olarak `run_state_observations` tarafinda
+  saklanir; bizim recete state'imizle eslesmesi daha sonra yapilir.
+- `channel_code` dinamik tutulur; yeni kanal gelirse `channels` tablosuna
+  eklenir.
+- Bir sample icinde ayni `channel_code` ikinci kez gelirse istek reddedilir.
+- `raw_text` her zaman saklanir, `numeric_value` yalniz parse edilebilen
+  degerlerde dolar.
+- `numeric_value` finite olmalidir; `NaN` veya sonsuz degerler adapter
+  tarafindan `invalid` kaliteye cevrilmelidir.
+- `quality` bos gelirse collector temel kaliteyi uretir; adapter gerekirse
+  `good`, `suspect` veya `invalid` gonderebilir.
+- Zaman boslugu ve supheli deger olaylari `quality_events` tablosuna yazilir.
+
+Frontend tarafinda secili kosu `running` durumundaysa sample ve kalite
+endpointleri 30 saniyede bir yenilenir. Bu bugun polling ile yapiliyor; veri hizi
+artarsa ayni ingest modeli korunup UI tarafinda SSE veya WebSocket eklenebilir.
+Canli grafik `latest=5000` ile sinirli pencere ister; backend daha sonra cursor
+cache'e gecmek icin `after_sequence` sorgusunu da destekler.
+
 Sirali yol:
 
 ### Asama A: CSV import
@@ -316,27 +611,52 @@ Mevcut ornek dosya ile kalici veri ve grafik akisi tamamlanir.
 Import edilen CSV, canli veri gibi oynatilir.
 
 ```text
-CSV rows -> replay timer -> API -> SQLite -> live chart
+CSV rows -> replay timer -> ingest API -> SQLite -> live chart
 ```
 
 Bu sayede gercek makine olmadan canli grafik davranisi test edilir.
 
 ### Asama C: CSV tail
 
+Durum: tamamlandi (14 Temmuz 2026).
+
+Bu asamanin dosya, migration, API, UI ve test bazinda uygulanabilir plani icin
+bkz. [csv-tail-implementation-plan.md](csv-tail-implementation-plan.md).
+
 Makine bir CSV dosyasina surekli satir ekliyorsa:
 
 - Son okunan byte konumu saklanir.
 - Yeni satirlar okunur.
 - Yarim yazilmis satir bekletilir.
-- Dosya yenilenirse durum raporlanir.
+- Yeni gunluk dosya olusursa eski run tamamlanir ve yeni run'a otomatik gecilir.
+- Okunan satirlar dogrudan tabloya yazilmaz; ortak ingest modeline cevrilir.
+- Grafik X ekseni polling saatini degil CSV'deki `TARIH SAAT` degerini kullanir.
+- Atlanan olcum sonraki noktayi kaydirmaz; 240 saniyeyi asan aralik `time_gap`
+  olarak raporlanir ve grafik cizgisi boslukta kesilir.
 
-### Asama D: Kablolu cihaz baglantisi
+### Asama D: HTTP push / webhook
+
+Veri internetten veya ag icindeki baska bir servisten gelebilir. Bu durumda
+dis kaynak dogrudan UI'a baglanmaz; collector bir HTTP push/webhook adapteri
+olarak davranir veya guvenilir bir local bridge'den veri alir.
+
+Notlar:
+
+- Gelen payload once kaynak formatindan ortak sample formatina cevrilir.
+- Kaynak zaman metni `source_timestamp_text` olarak korunur.
+- Tekrar gonderimlere karsi `source_sequence` veya kaynak tarafindaki stabil
+  mesaj id'si kullanilir.
+- Kimlik dogrulama, imza kontrolu ve rate limit bu adapterin sorumlulugudur;
+  grafik ve storage katmani bu detaylara baglanmaz.
+
+### Asama E: Kablolu cihaz baglantisi
 
 Makine protokolu kesinlesince eklenir:
 
 - Seri port ise `tokio-serial`
 - Modbus RTU/TCP ise `tokio-modbus`
 - Ureticiye ozel TCP ise ayri adapter
+- Adapter okudugu degerleri ortak ingest modeline cevirir.
 
 Bu kisim MVP degil.
 
@@ -689,6 +1009,10 @@ Uygulama sirasinda bu liste takip edilecek.
 13. Axum static frontend serve etsin.
 14. README'i calistirma komutlariyla guncelle.
 15. Tauri'yi opsiyonel durumda birak.
+16. Recete/state modelini ekle.
+17. State bazli kanal limitlerini tanimla.
+18. Run icin state segmentlerini kaydet ve grafikte goster.
+19. State limit ihlallerini `quality_events` olarak uret.
 
 ## Basari Kriterleri
 
@@ -711,6 +1035,7 @@ Bu maddeler simdilik park edilir:
 
 - Tauri installer
 - Serial/Modbus gercek cihaz adapteri
+- Recete editoru ve state bazli guvenli aralik motoru
 - Parquet/DuckDB export
 - Python analiz sidecar
 - PostgreSQL merkezi sistem

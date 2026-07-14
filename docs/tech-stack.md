@@ -97,9 +97,11 @@ islerde async calisma modeli saglar.
 
 Collector sorumluluklari:
 
-- Makineden periyodik veri okumak
-- Baglanti kopmasi ve yeniden baglanma senaryolarini yonetmek
-- Ham veriyi domain modeline cevirmek
+- CSV, replay, HTTP/webhook, seri port, Modbus veya vendor protokolu gibi
+  kaynaklardan veri alabilecek adapter sinirini tasimak
+- Baglanti kopmasi ve yeniden baglanma senaryolarini adapter seviyesinde
+  yonetmek
+- Ham veriyi ortak sample/measurement modeline cevirmek
 - Veriyi SQLite'a yazmak
 - Frontend'e canli durum ve gecmis veri API'lari sunmak
 
@@ -107,24 +109,38 @@ Collector sorumluluklari:
 
 Yerel HTTP API icin kullanilir. Frontend, Tauri icinden bu API ile konusur.
 
-Olasi endpoint gruplari:
+Endpoint gruplari:
 
 - `/api/health`
-- `/api/live`
+- `/api/imports/csv`
 - `/api/runs`
+- `/api/runs/:id`
+- `/api/runs/:id/status`
 - `/api/runs/:id/samples`
-- `/api/recipes`
-- `/api/settings`
+- `/api/runs/:id/state-observations`
+- `/api/runs/:id/state-segments`
+- `/api/runs/:id/quality-events`
+- `/api/runs/:id/export.csv`
 
-### tokio-modbus / tokio-serial
+Canli veya parca parca gelen veri icin `POST /api/runs` ve
+`POST /api/runs/:id/samples` ortak ingest siniridir. Bu sinir UI'yi hangi
+kaynagin kullanildigindan bagimsiz tutar.
 
-Makine haberlesmesi icin kullanilir.
+### Kaynak Adapterleri
+
+Makine veya dis kaynak haberlesmesi collector icinde adapter olarak tutulur.
+Bugun CSV import, CSV tail ve HTTP ingest siniri vardir; donanim protokolu kesinlesince
+asagidaki bagimliliklar kullanilir.
 
 - `tokio-serial`: Seri port uzerinden haberlesme.
 - `tokio-modbus`: Modbus RTU/TCP protokolu ile register okuma/yazma.
+- HTTP push/webhook: Internet veya ag icindeki baska bir sistemden veri alma.
+- CSV tail: Surekli yazilan dosyadan yeni satirlari okuma.
+- Replay: Eski kosuyu zamanlayici ile canli akis gibi oynatma.
 
-Haberlesme katmani cihaz markasi ve register haritasi degisebilecegi icin
-collector icinde ayri bir adapter olarak tutulmalidir.
+Haberlesme katmani cihaz markasi, register haritasi veya veri kaynagi
+degisebilecegi icin storage ve UI koduna sizmaz. Her adapter kendi kaynak
+formatini ortak `sample_frames` + `measurements` modeline cevirir.
 
 ### Serde
 
@@ -140,10 +156,31 @@ async sorgular ve migration yonetimi kullanilir.
 Temel tablolar:
 
 - `runs`: Her freeze dry kosusu
-- `samples`: Zaman serisi sensor olcumleri
-- `events`: Alarm, faz gecisi, operator notu gibi olaylar
-- `recipes`: Recete tanimlari
+- `import_files`: CSV import izlenebilirligi ve duplicate korumasi
+- `channels`: Dinamik olcum kanallari
+- `sample_frames`: Zaman satirlari
+- `measurements`: Kanal bazli ham ve parse edilmis degerler
+- `quality_events`: Zaman boslugu, supheli deger ve parse olaylari
 - `settings`: Uygulama ve cihaz ayarlari
+
+Ileride recete/state katmani eklendiginde su tablolar ayrica gelir:
+
+- `recipes`: Coklu recete katalog kayitlari
+- `recipe_versions`: Recetelerin degismez versiyon snapshot'lari
+- `recipe_states`: Bir recete versiyonu icindeki proses state/asamalari
+- `recipe_channel_limits`: State bazli kanal guvenli araliklari
+- `run_recipe_assignments`: Bir kosunun hangi recete versiyonlariyla
+  yorumlandigi; biri `primary`, digerleri karsilastirma olabilir
+- `run_state_observations`: Makineden/dis kaynaktan gelen ham aktif
+  recete-state/adim bilgisi
+- `run_state_segments`: Kosu zaman cizelgesinde hangi state'in ne zaman
+  gecerli oldugu; assignment seviyesine baglanir
+
+Bu tablolar ham telemetry tablolarinin yerine gecmez. Telemetry degismez;
+makineden gelen ham state/adim bilgisi de once observation olarak saklanir.
+Recete/state katmani bu verilerin uzerinde yorum ve limit kontrolu yapar. State
+bazli limit ihlalleri `quality_events` icinde `state_limit_warning`,
+`state_limit_alarm` veya `state_unmapped` gibi event tipleriyle temsil edilir.
 
 ### WAL
 
@@ -202,6 +239,8 @@ Ilk surumda odak su parcalarda kalmalidir:
 - Gecmis kosu detayi
 - Temel grafikler
 - CSV veya Parquet export icin hazir veri modeli
+- Sonraki fazda recete state'leri ve guvenli araliklari bindirmeye hazir
+  grafik/quality modeli
 
 Bu kapsam, merkezi sistem veya ileri analiz ihtiyaci dogmadan once cekirdek
 veri toplama ve izleme akisini dogrulamaya yeterlidir.

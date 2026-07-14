@@ -1,5 +1,6 @@
 use anyhow::Context;
 use collector::config::CollectorConfig;
+use collector::csv_tail::CsvTailManager;
 use collector::{db, routes};
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
@@ -12,8 +13,10 @@ async fn main() -> anyhow::Result<()> {
 
     let config = CollectorConfig::from_env()?;
     let pool = db::connect_database(&config.database_url).await?;
+    let csv_tail = CsvTailManager::new(pool.clone());
+    csv_tail.start_if_enabled().await?;
 
-    let app = routes::router(pool)
+    let app = routes::router_with_csv_tail(pool, csv_tail)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());
 
