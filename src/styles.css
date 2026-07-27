@@ -428,7 +428,7 @@ h2 {
 
 .process-facts {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 1px;
   overflow: hidden;
   border-left: 1px solid var(--border-soft);
@@ -580,7 +580,7 @@ h2 {
 
 .inspector-tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 1px;
   overflow: hidden;
   border: 1px solid var(--border);
@@ -1105,6 +1105,42 @@ h2 {
   line-height: 1.4;
 }
 
+.csv-folder-drop {
+  display: grid;
+  gap: 4px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-2);
+  padding: 12px;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease;
+}
+
+.csv-folder-drop.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface-2));
+}
+
+.csv-folder-drop strong {
+  color: var(--text-1);
+  font-size: 0.82rem;
+}
+
+.csv-folder-drop span {
+  color: var(--text-2);
+  font-size: 0.74rem;
+  line-height: 1.4;
+}
+
+.csv-folder-drop-notice {
+  margin: 0;
+  color: var(--ok);
+  font-size: 0.76rem;
+  font-weight: 750;
+  line-height: 1.4;
+}
+
 .csv-tail-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1221,6 +1257,117 @@ h2 {
   border-left: 3px solid var(--accent);
   background: var(--surface-2);
   padding: 12px;
+}
+
+.analysis-summary {
+  display: grid;
+  gap: 12px;
+}
+
+.analysis-profile,
+.analysis-current,
+.analysis-event-counts,
+.analysis-cycle {
+  border: 1px solid var(--border-soft);
+  background: var(--surface-2);
+}
+
+.analysis-profile,
+.analysis-current,
+.analysis-cycle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 12px;
+}
+
+.analysis-profile div,
+.analysis-cycle > div {
+  display: grid;
+  gap: 3px;
+}
+
+.analysis-profile span,
+.analysis-current span,
+.analysis-cycle span,
+.analysis-cycle small,
+.analysis-empty,
+.analysis-event-counts span {
+  color: var(--text-2);
+  font-size: 0.76rem;
+}
+
+.analysis-profile strong,
+.analysis-current strong,
+.analysis-cycle strong,
+.analysis-event-counts strong {
+  color: var(--text-1);
+  font-weight: 900;
+}
+
+.analysis-profile small {
+  color: var(--accent-strong);
+  font-size: 0.72rem;
+  font-weight: 900;
+}
+
+.analysis-current {
+  align-items: baseline;
+  border-left: 3px solid var(--warning);
+}
+
+.analysis-current strong {
+  color: var(--warning);
+  font-size: 1rem;
+}
+
+.analysis-current small {
+  color: var(--text-2);
+  font-weight: 800;
+}
+
+.analysis-event-counts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  background: var(--border-soft);
+}
+
+.analysis-event-counts div {
+  display: grid;
+  gap: 4px;
+  background: var(--surface-1);
+  padding: 10px;
+}
+
+.analysis-cycle-list {
+  display: grid;
+  gap: 8px;
+}
+
+.analysis-cycle > div:last-child {
+  justify-items: end;
+}
+
+.cycle-status {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  padding: 3px 7px;
+  font-weight: 900;
+}
+
+.cycle-status.active,
+.cycle-status.completed {
+  border-color: color-mix(in srgb, var(--ok) 50%, var(--border));
+  color: var(--ok);
+}
+
+.cycle-status.interrupted,
+.cycle-status.incomplete {
+  border-color: color-mix(in srgb, var(--warning) 50%, var(--border));
+  color: var(--warning);
 }
 
 .quality-summary {
@@ -1695,6 +1842,13 @@ h2 {
 
 :root[data-theme="dark"] .quality-summary {
   border-left-color: var(--warning);
+  background: #121416;
+}
+
+:root[data-theme="dark"] .analysis-profile,
+:root[data-theme="dark"] .analysis-current,
+:root[data-theme="dark"] .analysis-event-counts,
+:root[data-theme="dark"] .analysis-cycle {
   background: #121416;
 }
 

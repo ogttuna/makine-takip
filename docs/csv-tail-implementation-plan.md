@@ -16,20 +16,23 @@ sozlesmesini kaydeder.
 
 1. Rust collector CSV klasorunun bulundugu fabrika PC'sinde calisir.
 2. Operator web arayuzunde **Islemler > Kaynak** bolumune klasorun tam path'ini
-   girip **Kaydet ve baslat** der.
-3. Collector eski CSV'leri bir kez import eder ve en yeni CSV'yi aktif dosya
-   olarak acar.
+   girip **Kaydet ve baslat** der. Tauri masaustu uygulamasinda klasoru drop
+   alanina birakmak ayni islemi otomatik yapar.
+3. Collector eski CSV'leri deterministik dosya sirasiyla ayni run'a ekler ve en
+   yeni CSV'yi aktif dosya olarak acar.
 4. Makine dosyaya veri ekledikce yalnizca yeni, satir sonu tamamlanmis kayitlar
    SQLite'a yazilir.
 5. Web arayuzu aktif run'i takip eder ve grafigi 30 saniyede bir yeniler.
-6. Yeni gunluk CSV gecerli header ile olustugunda eski run `completed`, yeni run
-   `running` olur; grafik canli takip modunda yeni run'a gecer.
+6. Yeni gunluk CSV gecerli header ile olustugunda aktif run korunur ve collector
+   yeni dosyadan ayni source sequence zincirine devam eder.
 7. Collector yeniden baslarsa kayitli byte checkpoint'inden devam eder.
 
 Browser keyfi bir yerel klasoru dogrudan okuyamaz. Path'i okuyan web sayfasi
 degil, ayni fabrika PC'sinde calisan collector servisidir. Bu nedenle ozellik
 bir web projesi uzerinden kullanilirken collector'in CSV klasorune dosya sistemi
-erisimi olmalidir.
+erisimi olmalidir. Native Tauri webview'i klasor drop olayinda mutlak path'i
+verebildigi icin surukle-birak yalniz masaustu kabugunda otomatik
+konfigurasyona donusturulur; normal browser'da path elle girilir.
 
 ## Uygulanan Mimari
 
@@ -118,17 +121,24 @@ olamaz.
 ## Dosya Secimi ve Rotasyon
 
 1. Normal dosyalar pattern ile filtrelenir.
-2. Adaylar modified time, esitlik halinde path ile deterministik siralanir.
+2. Klasordeki tum adaylar `LogFile_YYYY_MM_DD.csv` formatindaysa adlarindaki
+   tarih kullanilir. Boylece eski bir dosyanin sonradan kopyalanmasi gunluk
+   akis sirasini bozmaz. Baska adlar da varsa geriye uyumluluk icin modified
+   time, esitlik halinde path ile deterministik siralama kullanilir.
 3. En yeni gecerli dosya aktif adaydir.
-4. Ilk scan'de daha eski dosyalar duplicate korumali tam import edilir.
+4. Ilk scan'de daha eski dosyalar deterministik sirayla ayni run'a backfill
+   edilir.
+   Bir tarihsel dosya okunamazsa daha yeni dosyaya atlanmaz; kaynak `degraded`
+   olur ve duzeltilen dosya ayni run uzerinden yeniden denenir.
 5. Aktif dosyanin header'i checkpoint'e yazilir ve mevcut tamamlanmis satirlar
    ingest edilir.
 6. Sonraki scan'lerde `byte_offset` sonrasindaki byte'lar okunur.
 7. Yeni aday gecerli header'a sahip oldugunda eski dosya EOF'a kadar drain
-   edilir, eski checkpoint/run tamamlanir ve yeni run acilir.
+   edilir, eski checkpoint tamamlanir ve yeni dosya ayni run ile acilir.
 
-Dosya adinda tarih bulunmasi zorunlu degildir. Secim modified time ve path ile
-yapilir.
+Dosya adinda tarih bulunmasi zorunlu degildir. Fabrika formati
+`LogFile_YYYY_MM_DD.csv` tarih sirasini garanti eder; karma/ozel adlarda secim
+modified time ve path ile yapilir.
 
 ## Runtime Durumlari
 
@@ -201,7 +211,7 @@ secerse `followLive` kapanir; yeni gunluk dosya onu canliya geri firlatmaz.
 - [x] Duplicate scan ve manager restart'inda idempotency sagla.
 - [x] Truncation ve parser hatalarini `degraded` olarak raporla.
 - [x] Yeni bos dosyada bekle, gecerli hale gelince otomatik rotate et.
-- [x] Eski run'i completed ve yeni run'i running yap.
+- [x] Gunluk rotasyonda ayni run ve kesintisiz source sequence'i koru.
 - [x] Tek worker, start/stop/rescan ve startup auto-resume ekle.
 
 ### API ve web
@@ -212,7 +222,7 @@ secerse `followLive` kapanir; yeni gunluk dosya onu canliya geri firlatmaz.
 - [x] Kaynak paneline path ve lifecycle kontrollerini ekle.
 - [x] TR/EN durum ve hata metinlerini ekle.
 - [x] Aktif run icin 30 saniyelik bounded grafik polling'i ekle.
-- [x] Canliyi takip et ve gunluk yeni run'a otomatik gecis davranisini ekle.
+- [x] Canliyi takip et ve gunluk yeni dosyaya ayni run ile otomatik gec.
 - [x] Gecmis run seciminde otomatik takibi kapat.
 
 ### Test ve dokumantasyon
@@ -251,8 +261,8 @@ secerse `followLive` kapanir; yeni gunluk dosya onu canliya geri firlatmaz.
 - [x] Yarim satir tamamlanmadan yazilmaz.
 - [x] Collector restart sonrasi checkpoint'ten devam eder.
 - [x] Yeni gunluk CSV otomatik algilanir.
-- [x] Eski run completed, yeni run running olur.
-- [x] Canli takip modu yeni run'a otomatik gecer.
+- [x] Gunluk dosya degisiminde aktif run running kalir.
+- [x] Canli takip modu ayni run'da yeni dosyayi izlemeye devam eder.
 - [x] Gecmis run incelemesi otomatik secim tarafindan bozulmaz.
 - [x] Kaynak hatalari collector'i dusurmeden UI'da gorunur.
 - [x] Test, build ve production smoke kontrolleri gecer.

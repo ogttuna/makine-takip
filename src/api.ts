@@ -103,6 +103,66 @@ export const stateSegmentsResponseSchema = z.object({
   segments: z.array(stateSegmentSchema),
 });
 
+export const analysisProfileSchema = z.object({
+  id: z.number(),
+  code: z.string(),
+  version: z.string(),
+  machine_model: z.string(),
+  config_json: z.string(),
+});
+
+export const processCycleSchema = z.object({
+  id: z.number(),
+  loop_number: z.number(),
+  started_at: z.string(),
+  dry_started_at: z.string().nullable(),
+  stopped_at: z.string().nullable(),
+  wait_started_at: z.string().nullable(),
+  defrost_started_at: z.string().nullable(),
+  defrost_stopped_at: z.string().nullable(),
+  finished_at: z.string().nullable(),
+  status: z.enum(["active", "completed", "interrupted", "incomplete"]),
+  confidence: z.number(),
+  metadata_json: z.string().nullable(),
+});
+
+export const processStateSegmentSchema = z.object({
+  id: z.number(),
+  process_cycle_id: z.number().nullable(),
+  loop_number: z.number().nullable(),
+  state_code: z.enum([
+    "START",
+    "DRY",
+    "STOP",
+    "WAIT",
+    "DEFROST",
+    "DEFROST_STOP",
+  ]),
+  started_at: z.string(),
+  finished_at: z.string().nullable(),
+  confidence: z.number(),
+  metadata_json: z.string().nullable(),
+});
+
+export const diagnosticEventSchema = z.object({
+  id: z.number(),
+  process_cycle_id: z.number().nullable(),
+  loop_number: z.number().nullable(),
+  frame_id: z.number().nullable(),
+  occurred_at: z.string(),
+  event_type: z.string(),
+  severity: z.enum(["info", "warning"]),
+  message: z.string(),
+  metadata_json: z.string().nullable(),
+});
+
+export const runAnalysisSchema = z.object({
+  profile: analysisProfileSchema,
+  cycles: z.array(processCycleSchema),
+  segments: z.array(processStateSegmentSchema),
+  events: z.array(diagnosticEventSchema),
+});
+
 export const appendSamplesReportSchema = z.object({
   run_id: z.number(),
   inserted_count: z.number(),
@@ -137,6 +197,11 @@ export type SampleFrame = z.infer<typeof sampleFrameSchema>;
 export type QualityEvent = z.infer<typeof qualityEventSchema>;
 export type StateObservation = z.infer<typeof stateObservationSchema>;
 export type StateSegment = z.infer<typeof stateSegmentSchema>;
+export type AnalysisProfile = z.infer<typeof analysisProfileSchema>;
+export type ProcessCycle = z.infer<typeof processCycleSchema>;
+export type ProcessStateSegment = z.infer<typeof processStateSegmentSchema>;
+export type DiagnosticEvent = z.infer<typeof diagnosticEventSchema>;
+export type RunAnalysis = z.infer<typeof runAnalysisSchema>;
 export type AppendSamplesReport = z.infer<typeof appendSamplesReportSchema>;
 export type CsvTailStatus = z.infer<typeof csvTailStatusSchema>;
 
@@ -201,7 +266,14 @@ export type FetchRunSamplesOptions = {
   afterSequence?: number;
 };
 
-const apiBaseUrl = import.meta.env.VITE_COLLECTOR_URL ?? "http://127.0.0.1:4777";
+const configuredApiBaseUrl = import.meta.env.VITE_COLLECTOR_URL?.trim();
+const apiBaseUrl =
+  configuredApiBaseUrl ||
+  (import.meta.env.DEV
+    ? "http://127.0.0.1:4777"
+    : window.location.protocol === "http:" || window.location.protocol === "https:"
+      ? window.location.origin
+      : "http://127.0.0.1:4777");
 
 async function getJson(url: string): Promise<unknown> {
   const response = await fetch(url);
@@ -422,6 +494,16 @@ export async function fetchRunStateSegments(
 
   const payload = await getJson(url.toString());
   return stateSegmentsResponseSchema.parse(payload).segments;
+}
+
+export async function fetchRunAnalysis(runId: number): Promise<RunAnalysis> {
+  const payload = await getJson(`${apiBaseUrl}/api/runs/${runId}/analysis`);
+  return runAnalysisSchema.parse(payload);
+}
+
+export async function reanalyzeRun(runId: number): Promise<RunAnalysis> {
+  const payload = await postEmpty(`${apiBaseUrl}/api/runs/${runId}/analysis`);
+  return runAnalysisSchema.parse(payload);
 }
 
 export function getCollectorUrl(): string {

@@ -103,7 +103,7 @@ async fn appends_auto_sequences_and_quality_events() {
     assert_eq!(report.inserted_count, 2);
     assert_eq!(report.skipped_count, 0);
     assert_eq!(report.channel_count, 3);
-    assert_eq!(report.warning_count, 2);
+    assert_eq!(report.warning_count, 1);
     assert_eq!(report.error_count, 1);
     assert_eq!(
         report.latest_sampled_at.as_deref(),
@@ -133,7 +133,7 @@ async fn appends_auto_sequences_and_quality_events() {
     .unwrap();
 
     assert_eq!(sequences, vec![1, 2]);
-    assert_eq!(warning_count, 2);
+    assert_eq!(warning_count, 1);
     assert_eq!(error_count, 1);
 }
 

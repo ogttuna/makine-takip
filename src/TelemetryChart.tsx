@@ -6,6 +6,7 @@ import {
   type GridComponentOption,
   LegendComponent,
   type LegendComponentOption,
+  MarkAreaComponent,
   TooltipComponent,
   type TooltipComponentOption,
 } from "echarts/components";
@@ -18,7 +19,7 @@ import type { ComposeOption, EChartsType } from "echarts/core";
 import { CanvasRenderer } from "echarts/renderers";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { QualityEvent, SampleFrame } from "./api";
+import type { ProcessStateSegment, QualityEvent, SampleFrame } from "./api";
 import {
   channelColor,
   channelLabel,
@@ -31,6 +32,7 @@ import type { Locale } from "./i18n";
 
 type TelemetryChartProps = {
   samples: SampleFrame[];
+  processSegments: ProcessStateSegment[];
   qualityEvents: QualityEvent[];
   visibleChannels: string[];
   variant?: "large" | "compact";
@@ -98,12 +100,14 @@ echarts.use([
   GridComponent,
   LegendComponent,
   LineChart,
+  MarkAreaComponent,
   ScatterChart,
   TooltipComponent,
 ]);
 
 export function TelemetryChart({
   locale = "tr",
+  processSegments,
   samples,
   qualityEvents,
   showSlider = true,
@@ -115,8 +119,16 @@ export function TelemetryChart({
   const chartRef = useRef<EChartsType | null>(null);
   const [legendSelection, setLegendSelection] = useState<Record<string, boolean>>({});
   const series = useMemo(
-    () => buildSeries(samples, qualityEvents, visibleChannels, themeMode, locale),
-    [locale, qualityEvents, samples, themeMode, visibleChannels],
+    () =>
+      buildSeries(
+        samples,
+        qualityEvents,
+        processSegments,
+        visibleChannels,
+        themeMode,
+        locale,
+      ),
+    [locale, processSegments, qualityEvents, samples, themeMode, visibleChannels],
   );
 
   useEffect(() => {
@@ -293,6 +305,7 @@ function legendSelectEventFrom(event: unknown): LegendSelectChangedEvent | null 
 function buildSeries(
   samples: SampleFrame[],
   qualityEvents: QualityEvent[],
+  processSegments: ProcessStateSegment[],
   visibleChannels: string[],
   themeMode: "light" | "dark",
   locale: Locale,
@@ -342,7 +355,8 @@ function buildSeries(
     }
 
     const channelValues = numericValuesForChannel(samples, channel).filter(
-      (point) => point.quality === "good",
+      (point) =>
+        point.quality === "good" && !isShelfOffReading(channel, point.value),
     );
     const markerValue = median(channelValues.map((point) => point.value));
     const lineData: ChartDatum[] = [];
@@ -364,7 +378,11 @@ function buildSeries(
 
       previousTimestamp = Number.isFinite(timestampMs) ? timestampMs : previousTimestamp;
 
-      if (!measurement || measurement.numeric_value === null) {
+      if (
+        !measurement ||
+        measurement.numeric_value === null ||
+        isShelfOffReading(channel, measurement.numeric_value)
+      ) {
         lineData.push({ value: [timestamp, null] });
         continue;
       }
@@ -427,6 +445,37 @@ function buildSeries(
         },
       });
     }
+  }
+
+  const stateAreaTarget = result.find(
+    (series): series is LineSeriesOption => series.type === "line",
+  );
+
+  if (stateAreaTarget && processSegments.length > 0 && samples.length > 0) {
+    const lastSampledAt = samples[samples.length - 1].sampled_at;
+    stateAreaTarget.markArea = {
+      silent: true,
+      label: {
+        show: true,
+        color: palette.axisText,
+        fontFamily: CHART_FONT_FAMILY,
+        fontSize: 10,
+        fontWeight: 700,
+        position: "insideTop",
+      },
+      data: processSegments.map((segment) => [
+        {
+          name: stateDisplayName(segment.state_code, locale),
+          xAxis: segment.started_at,
+          itemStyle: {
+            color: stateAreaColor(segment.state_code, themeMode),
+          },
+        },
+        {
+          xAxis: segment.finished_at ?? lastSampledAt,
+        },
+      ]),
+    } as LineSeriesOption["markArea"];
   }
 
   return { colors, series: result, yAxis: axisLayout.yAxis };
@@ -571,7 +620,8 @@ function shelfAverageLineData(
         !measurement ||
         measurement.numeric_value === null ||
         measurement.quality !== "good" ||
-        eventByFrameChannel.has(`${sample.id}:${channel}`)
+        eventByFrameChannel.has(`${sample.id}:${channel}`) ||
+        isShelfOffReading(channel, measurement.numeric_value)
       ) {
         return [];
       }
@@ -593,6 +643,33 @@ function shelfAverageLineData(
   }
 
   return lineData;
+}
+
+function isShelfOffReading(channel: string, value: number): boolean {
+  return SHELF_CHANNELS.includes(channel) && Math.abs(value - 850) <= 0.5;
+}
+
+function stateDisplayName(
+  state: ProcessStateSegment["state_code"],
+  _locale: Locale,
+): string {
+  return state.replace("_", " ");
+}
+
+function stateAreaColor(
+  state: ProcessStateSegment["state_code"],
+  themeMode: "light" | "dark",
+): string {
+  const alpha = themeMode === "dark" ? "24" : "18";
+  const colors: Record<ProcessStateSegment["state_code"], string> = {
+    START: `#3b82f6${alpha}`,
+    DRY: `#16a34a${alpha}`,
+    STOP: `#dc2626${alpha}`,
+    WAIT: `#64748b${alpha}`,
+    DEFROST: `#f59e0b${alpha}`,
+    DEFROST_STOP: `#8b5cf6${alpha}`,
+  };
+  return colors[state];
 }
 
 function formatTooltip(

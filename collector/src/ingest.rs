@@ -224,6 +224,12 @@ pub async fn append_samples(
     let channel_count = channel_count_for_run(&mut tx, run_id).await? as usize;
     tx.commit().await?;
 
+    if inserted_count > 0
+        && let Err(error) = crate::analysis::analyze_run(pool, run_id).await
+    {
+        tracing::warn!(run_id, %error, "failed to refresh FD-750 analysis after ingest");
+    }
+
     Ok(AppendSamplesReport {
         run_id,
         inserted_count,
@@ -299,7 +305,10 @@ fn prepare_state_observation(
 fn prepare_measurement(
     measurement: AppendMeasurementRequest,
 ) -> anyhow::Result<PreparedMeasurement> {
-    let channel_code = non_empty(measurement.channel_code, "channel_code")?;
+    let channel_code = crate::csv_import::canonical_channel_code(&non_empty(
+        measurement.channel_code,
+        "channel_code",
+    )?);
     let raw_text = measurement
         .raw_text
         .or_else(|| measurement.numeric_value.map(|value| value.to_string()))
@@ -307,10 +316,10 @@ fn prepare_measurement(
         .ok_or_else(|| anyhow!("measurement {channel_code} must include raw_text or a value"))?;
     let provided_numeric = measurement.numeric_value;
 
-    if let Some(value) = provided_numeric {
-        if !value.is_finite() {
-            bail!("measurement {channel_code} numeric_value must be finite");
-        }
+    if let Some(value) = provided_numeric
+        && !value.is_finite()
+    {
+        bail!("measurement {channel_code} numeric_value must be finite");
     }
 
     let parsed_numeric = raw_text
@@ -325,26 +334,17 @@ fn prepare_measurement(
             "text".to_string()
         }
     });
-    let mut quality = measurement.quality.unwrap_or_else(|| {
+    let quality = measurement.quality.unwrap_or_else(|| {
         if numeric_value.is_some() {
             "good".to_string()
         } else {
             "invalid".to_string()
         }
     });
-    let mut quality_reason = measurement.quality_reason;
+    let quality_reason = measurement.quality_reason;
 
     if !matches!(quality.as_str(), "good" | "suspect" | "invalid") {
         bail!("measurement {channel_code} has unsupported quality `{quality}`");
-    }
-
-    if quality == "good" && channel_code == "RAF3" {
-        if let Some(value) = numeric_value {
-            if (value - 850.0).abs() < 0.000_001 {
-                quality = "suspect".to_string();
-                quality_reason = Some("raf3_850_suspect".to_string());
-            }
-        }
     }
 
     Ok(PreparedMeasurement {
@@ -991,7 +991,7 @@ fn default_group(channel_code: &str) -> &'static str {
         "RAF1" | "RAF2" | "RAF3" | "RAF4" => "shelf",
         "L_PRES" | "H_PRES" => "pressure",
         "VACUM" => "vacuum",
-        "SERP2" | "SERP4" | "KONDANSER" => "cooling",
+        "S1" | "S2" | "S3" | "S4" | "SERP2" | "SERP4" | "KONDANSER" => "cooling",
         _ => "other",
     }
 }

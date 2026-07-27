@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, anyhow, bail};
 use chrono::NaiveDateTime;
@@ -10,7 +10,7 @@ const TIMESTAMP_COLUMN: &str = "TARIH SAAT";
 const TIMESTAMP_FORMAT: &str = "%Y-%m-%d-%H:%M:%S%.f";
 const DISPLAY_TIMESTAMP_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.3f";
 const TIME_GAP_WARNING_SECONDS: f64 = 240.0;
-const PARSER_VERSION: &str = "csv-import-v1";
+const PARSER_VERSION: &str = "csv-import-v2-fd750";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ImportReport {
@@ -45,7 +45,17 @@ pub struct ParsedFrame {
     pub sampled_at: String,
     pub source_timestamp_text: String,
     pub source_row_number: i64,
+    pub state_observation: Option<ParsedStateObservation>,
     pub measurements: Vec<ParsedMeasurement>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedStateObservation {
+    pub source_recipe_code: Option<String>,
+    pub source_recipe_version: Option<String>,
+    pub source_state_code: String,
+    pub source_state_name: Option<String>,
+    pub source_payload_json: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -124,10 +134,26 @@ pub fn parse_csv_bytes(file_name: impl Into<String>, bytes: &[u8]) -> anyhow::Re
     let Some(timestamp_index) = positions.get(TIMESTAMP_COLUMN).copied() else {
         bail!("CSV missing required timestamp column `{TIMESTAMP_COLUMN}`");
     };
-    let channel_codes = headers
+    let mut canonical_codes = HashSet::<String>::new();
+    let mut channel_columns = Vec::<(String, usize, String)>::new();
+
+    for (index, header) in headers.iter().enumerate() {
+        if header == TIMESTAMP_COLUMN {
+            continue;
+        }
+
+        let canonical = canonical_channel_code(header);
+
+        if !canonical_codes.insert(canonical.clone()) {
+            bail!("CSV contains multiple columns that map to canonical channel `{canonical}`");
+        }
+
+        channel_columns.push((canonical, index, header.clone()));
+    }
+
+    let channel_codes = channel_columns
         .iter()
-        .filter(|header| header.as_str() != TIMESTAMP_COLUMN)
-        .cloned()
+        .map(|(canonical, _, _)| canonical.clone())
         .collect::<Vec<_>>();
 
     if channel_codes.is_empty() {
@@ -180,12 +206,9 @@ pub fn parse_csv_bytes(file_name: impl Into<String>, bytes: &[u8]) -> anyhow::Re
 
         let mut measurements = Vec::with_capacity(channel_codes.len());
 
-        for channel_code in &channel_codes {
-            let Some(column_index) = positions.get(channel_code.as_str()).copied() else {
-                continue;
-            };
+        for (channel_code, column_index, source_header) in &channel_columns {
             let raw_text = record
-                .get(column_index)
+                .get(*column_index)
                 .map(str::trim)
                 .unwrap_or_default()
                 .to_string();
@@ -195,42 +218,13 @@ pub fn parse_csv_bytes(file_name: impl Into<String>, bytes: &[u8]) -> anyhow::Re
                 .filter(|value| value.is_finite());
             let (numeric_value, value_text, value_type, quality, quality_reason) =
                 match parsed_value {
-                    Some(value) => {
-                        if channel_code == "RAF3" && (value - 850.0).abs() < 0.000_001 {
-                            warning_count += 1;
-                            quality_events.push(ParsedQualityEvent {
-                                source_row_number,
-                                channel_code: Some(channel_code.clone()),
-                                event_type: "suspect_value".to_string(),
-                                severity: "warning".to_string(),
-                                message: "`RAF3` reported sentinel-like value 850.0".to_string(),
-                                metadata_json: Some(
-                                    serde_json::json!({
-                                        "channel_code": channel_code,
-                                        "raw_value": value,
-                                        "rule": "raf3_850_suspect"
-                                    })
-                                    .to_string(),
-                                ),
-                            });
-
-                            (
-                                Some(value),
-                                None,
-                                ValueType::Number,
-                                MeasurementQuality::Suspect,
-                                Some("raf3_850_suspect".to_string()),
-                            )
-                        } else {
-                            (
-                                Some(value),
-                                None,
-                                ValueType::Number,
-                                MeasurementQuality::Good,
-                                None,
-                            )
-                        }
-                    }
+                    Some(value) => (
+                        Some(value),
+                        None,
+                        ValueType::Number,
+                        MeasurementQuality::Good,
+                        None,
+                    ),
                     None => {
                         error_count += 1;
                         quality_events.push(ParsedQualityEvent {
@@ -244,6 +238,7 @@ pub fn parse_csv_bytes(file_name: impl Into<String>, bytes: &[u8]) -> anyhow::Re
                             metadata_json: Some(
                                 serde_json::json!({
                                     "channel_code": channel_code,
+                                    "source_header": source_header,
                                     "raw_text": raw_text,
                                 })
                                 .to_string(),
@@ -271,10 +266,12 @@ pub fn parse_csv_bytes(file_name: impl Into<String>, bytes: &[u8]) -> anyhow::Re
             });
         }
 
+        let state_observation = parsed_state_observation(&measurements);
         frames.push(ParsedFrame {
             sampled_at: sampled_at.format(DISPLAY_TIMESTAMP_FORMAT).to_string(),
             source_timestamp_text: timestamp_text.to_string(),
             source_row_number,
+            state_observation,
             measurements,
         });
     }
@@ -307,6 +304,9 @@ pub async fn import_csv_bytes(
     let parsed = parse_csv_bytes(file_name, bytes)?;
 
     if let Some(report) = duplicate_report(pool, &parsed.file_sha256).await? {
+        if let Err(error) = crate::analysis::analyze_run(pool, report.run_id).await {
+            tracing::warn!(run_id = report.run_id, %error, "failed to refresh FD-750 analysis");
+        }
         return Ok(report);
     }
 
@@ -369,6 +369,41 @@ pub async fn import_csv_bytes(
         .fetch_one(&mut *tx)
         .await?;
         frame_ids.insert(frame.source_row_number, frame_id);
+
+        if let Some(observation) = &frame.state_observation {
+            sqlx::query(
+                r#"
+                INSERT INTO run_state_observations (
+                    run_id,
+                    frame_id,
+                    sampled_at,
+                    source_sequence,
+                    source_recipe_code,
+                    source_recipe_version,
+                    source_state_code,
+                    source_state_name,
+                    source_payload_json
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                "#,
+            )
+            .bind(run_id)
+            .bind(frame_id)
+            .bind(&frame.sampled_at)
+            .bind(frame.source_row_number)
+            .bind(&observation.source_recipe_code)
+            .bind(&observation.source_recipe_version)
+            .bind(&observation.source_state_code)
+            .bind(&observation.source_state_name)
+            .bind(
+                observation
+                    .source_payload_json
+                    .as_ref()
+                    .map(serde_json::Value::to_string),
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
 
         for measurement in &frame.measurements {
             let channel_id = channel_ids
@@ -463,6 +498,10 @@ pub async fn import_csv_bytes(
 
     tx.commit().await?;
 
+    if let Err(error) = crate::analysis::analyze_run(pool, run_id).await {
+        tracing::warn!(run_id, %error, "failed to build FD-750 analysis after CSV import");
+    }
+
     Ok(ImportReport {
         import_id,
         run_id,
@@ -530,9 +569,78 @@ fn default_group(channel_code: &str) -> &'static str {
         "RAF1" | "RAF2" | "RAF3" | "RAF4" => "shelf",
         "L_PRES" | "H_PRES" => "pressure",
         "VACUM" => "vacuum",
-        "SERP2" | "SERP4" | "KONDANSER" => "cooling",
+        "S1" | "S2" | "S3" | "S4" | "SERP2" | "SERP4" | "KONDANSER" => "cooling",
         _ => "other",
     }
+}
+
+pub fn canonical_channel_code(value: &str) -> String {
+    let normalized = value.trim().to_uppercase();
+
+    match normalized.as_str() {
+        "RAF1 HEDEF" | "RAF 1" => "RAF1".to_string(),
+        "RAF2 HEDEF" | "RAF 2" => "RAF2".to_string(),
+        "RAF3 HEDEF" | "RAF 3" => "RAF3".to_string(),
+        "RAF4 HEDEF" | "RAF 4" => "RAF4".to_string(),
+        "S 1" | "SERP1" => "S1".to_string(),
+        "S 2" | "SERP2" => "S2".to_string(),
+        "S 3" | "SERP3" => "S3".to_string(),
+        "S 4" | "SERP4" => "S4".to_string(),
+        "KOND" => "KONDANSER".to_string(),
+        "VACUUM" => "VACUM".to_string(),
+        _ => normalized,
+    }
+}
+
+fn parsed_state_observation(measurements: &[ParsedMeasurement]) -> Option<ParsedStateObservation> {
+    let recipe = measurement_text(measurements, "RECETE NO").filter(|value| !is_zero_like(value));
+    let step =
+        measurement_text(measurements, "RECETE ADIM").filter(|value| !is_zero_like(value))?;
+    let normalized_step = normalize_state_token(step);
+
+    Some(ParsedStateObservation {
+        source_recipe_code: recipe.map(ToString::to_string),
+        source_recipe_version: None,
+        source_state_code: format!("STEP_{normalized_step}"),
+        source_state_name: Some(format!("Reçete adım {step}")),
+        source_payload_json: Some(serde_json::json!({
+            "source": "csv",
+            "recipe_no": recipe,
+            "recipe_step": step,
+        })),
+    })
+}
+
+fn measurement_text<'a>(
+    measurements: &'a [ParsedMeasurement],
+    channel_code: &str,
+) -> Option<&'a str> {
+    measurements
+        .iter()
+        .find(|measurement| measurement.channel_code == channel_code)
+        .map(|measurement| measurement.raw_text.trim())
+        .filter(|value| !value.is_empty())
+}
+
+fn is_zero_like(value: &str) -> bool {
+    value
+        .parse::<f64>()
+        .ok()
+        .is_some_and(|parsed| parsed.abs() < f64::EPSILON)
+}
+
+fn normalize_state_token(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -577,9 +685,48 @@ mod tests {
                 .iter()
                 .filter(|event| event.event_type == "suspect_value")
                 .count(),
-            4
+            0
         );
-        assert_eq!(parsed.warning_count, 11);
+        assert_eq!(parsed.warning_count, 7);
         assert_eq!(parsed.error_count, 0);
+    }
+
+    #[test]
+    fn normalizes_fd750_channels_and_extracts_recipe_step() {
+        let csv = b"TARIH SAAT;RAF1 HEDEF;S 1;S 2;S 3;S 4;KOND;RECETE NO;RECETE ADIM\n\
+2026-07-25-10:00:00.000;850;-30;-31;-32;-33;-40;6;4\n";
+        let parsed = parse_csv_bytes("new-format.csv", csv).unwrap();
+        let frame = &parsed.frames[0];
+
+        assert_eq!(
+            parsed.channel_codes,
+            [
+                "RAF1",
+                "S1",
+                "S2",
+                "S3",
+                "S4",
+                "KONDANSER",
+                "RECETE NO",
+                "RECETE ADIM",
+            ]
+        );
+        assert_eq!(
+            frame
+                .state_observation
+                .as_ref()
+                .map(|item| item.source_state_code.as_str()),
+            Some("STEP_4")
+        );
+        assert_eq!(
+            frame
+                .state_observation
+                .as_ref()
+                .and_then(|item| item.source_recipe_code.as_deref()),
+            Some("6")
+        );
+        assert!(frame.measurements.iter().all(|item| {
+            item.channel_code != "RAF1" || item.quality == super::MeasurementQuality::Good
+        }));
     }
 }

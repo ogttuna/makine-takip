@@ -11,9 +11,12 @@ Bu repo su an calisan bir ilk iskelet icerir:
 - Apache ECharts ile zaman serisi grafigi
 - TanStack Query ile collector API polling
 - Zod ile runtime API dogrulama
-- Tauri 2 masaustu kabugu, ileride opsiyonel paketleme icin
+- Tauri 2 masaustu operator uygulamasi
+- Tauri acilisinda otomatik baslayan gomulu collector
 - Rust/Tokio/Axum collector API
 - CSV import, otomatik CSV klasor izleme ve kaynak bagimsiz canli ingest API'si
+- Excel analizinden cikarilan, versiyonlu FD-750 dongu ve proses-state motoru
+- Dongu/state ozeti, tani olaylari ve grafik uzerinde proses-state bantlari
 - SQLx + SQLite migration, WAL ve STRICT tablolar
 
 ## Hedef
@@ -24,8 +27,10 @@ olarak tasarlanir. Ana hedefler:
 - Makineden gelen sensor ve proses verilerini guvenilir sekilde kaydetmek.
 - Canli ve gecmis proses grafiklerini operator ekraninda gostermek.
 - Her kurutma kosusunu tarih, recete, parti ve notlarla takip etmek.
+- FD-750 proses dongulerini ve state gecislerini ham veriden tekrar
+  uretilebilir kurallarla yorumlamak.
 - Ileride recete state'lerine gore guvenli aralik ve limit ihlali yorumu
-  yapabilmek.
+  eklemek.
 - Veriyi once yerel SQLite uzerinde tutmak, ileride analiz ihtiyacina gore
   Parquet/DuckDB veya merkezi PostgreSQL'e genisletmek.
 - Verinin nereden gelecegi netlesmeden UI ve storage katmanini tek protokole
@@ -61,7 +66,7 @@ olarak tasarlanir. Ana hedefler:
 
 ### Ileride
 
-- Recete/state modeli ve state bazli guvenli aralik kontrolleri
+- Recete/state kataloglari icin operator editoru ve state bazli limit kontrolleri
 - Parquet + DuckDB
 - Python sidecar
 - PostgreSQL, yalnizca merkezi veya cok kullanicili sisteme gecilirse
@@ -70,6 +75,8 @@ Detayli teknik tanim icin bkz. [docs/tech-stack.md](docs/tech-stack.md).
 Uygulama plani icin bkz. [docs/implementation-plan.md](docs/implementation-plan.md).
 CSV klasor izleme ve gunluk dosya rotasyonu icin bkz.
 [docs/csv-tail-implementation-plan.md](docs/csv-tail-implementation-plan.md).
+FD-750 analiz kurallari icin bkz.
+[docs/fd750-analysis-rules.md](docs/fd750-analysis-rules.md).
 
 ## Kurulum
 
@@ -116,6 +123,10 @@ Tauri masaustu kabugunu calistirmak icin:
 npm run tauri:dev
 ```
 
+Masaustu uygulamasi collector'i otomatik baslatir; ayrica
+`npm run collector:dev` calistirmak gerekmez. Varsayilan masaustu SQLite dosyasi
+isletim sisteminin uygulama veri klasorunde tutulur.
+
 ## Komutlar
 
 - `npm run dev`: Vite frontend gelistirme sunucusu
@@ -125,13 +136,15 @@ npm run tauri:dev
 - `npm run collector:check`: Collector crate derleme kontrolu
 - `npm run local:serve`: Frontend build + collector static serve
 - `npm run tauri:dev`: Tauri 2 masaustu uygulamasi
-- `npm run check`: Frontend build ve collector check
+- `npm run check`: Klasör bırakma testleri, frontend üretim derlemesi ve collector check
 
 ## Ortam Degiskenleri
 
 `.env.example` dosyasindaki degerler varsayilan gelistirme ayarlaridir:
 
-- `VITE_COLLECTOR_URL`: Frontend'in kullanacagi collector API adresi
+- `VITE_COLLECTOR_URL`: Frontend'in kullanacagi collector API adresi. Bos
+  birakilirsa dev modunda `127.0.0.1:4777`, production web'de sayfanin acildigi
+  origin kullanilir.
 - `FREEZEDRY_BIND_ADDR`: Collector bind adresi
 - `FREEZEDRY_DB_URL`: SQLite dosya adresi
 
@@ -142,15 +155,27 @@ npm run tauri:dev
 Fabrika PC'sinde collector'i calistirin, web arayuzunde **Islemler > Kaynak**
 sekmesini acin ve makinenin CSV yazdigi klasorun tam path'ini girin. Bu path
 tarayicinin calistigi cihaza degil, collector'in calistigi fabrika PC'sine
-aittir. **Kaydet ve baslat** sonrasinda collector:
+aittir. Tauri masaustu uygulamasinda ayni ekrandaki alana klasor
+suruklenip birakilabilir; mutlak path otomatik alinir, kaydedilir ve izleme
+ek bir onay gerekmeden baslar. Normal web tarayicisi guvenlik nedeniyle yerel
+klasorun mutlak path'ini paylasmadigi icin web kullaniminda path alani korunur.
+Tauri kullaniliyorsa gomulu collector uygulama acilisinda kendisi baslar.
 
-- klasordeki eski `*.csv` dosyalarini bir kez import eder,
+**Kaydet ve baslat** veya masaustu klasor drop'u sonrasinda collector:
+
+- klasordeki eski `*.csv` dosyalarini ayni run'a ekler; tum dosyalar
+  `LogFile_YYYY_MM_DD.csv` formatindaysa kopyalanma zamanindan bagimsiz olarak
+  adlarindaki tarihe gore siralar,
 - en yeni dosyayi artimli okumaya baslar,
 - yalnizca satir sonu tamamlanmis yeni kayitlari isler,
 - byte checkpoint'i SQLite'ta saklayip restart sonrasinda kaldigi yerden devam
   eder,
-- yeni gunluk CSV gecerli bir header ile olustugunda eski run'i tamamlayip yeni
+- yeni gunluk CSV gecerli bir header ile olustugunda ayni run'i koruyarak yeni
   dosyaya otomatik gecer,
+- arada header'i henuz tamamlanmamis bir gunluk dosya varsa daha yeni dosyaya
+  atlamaz; dosyanin hazir olmasini bekler,
+- bozuk bir tarihsel CSV'yi sessizce atlamaz; hatayi gosterir ve dosya
+  duzeltildiginde ayni run uzerinden yeniden dener,
 - aktif run seciliyken grafigi 30 saniyede bir gunceller.
 
 Path'in collector tarafindan okunabilir ve bir klasor olmasi gerekir. Varsayilan
@@ -176,6 +201,8 @@ POST /api/csv-tail/stop
 POST /api/csv-tail/rescan
 GET  /api/runs/:id/samples?latest=5000
 GET  /api/runs/:id/samples?after_sequence=162&limit=1000
+GET  /api/runs/:id/analysis
+POST /api/runs/:id/analysis
 ```
 
 ### Manuel CSV import
@@ -217,6 +244,31 @@ Onemli kurallar:
   yenileyerek dinamik grafik akisini destekler.
 - Uzun canli kosular icin sample/state sorgulari zaman penceresi ve limit ile
   okunabilir.
+- Ham telemetry her eklemeden sonra FD-750 profilinin aktif versiyonuyla tekrar
+  analiz edilir. `POST /api/runs/:id/analysis` ayni analizi elle yeniler.
+
+## FD-750 Analiz Katmani
+
+`260725_FD750_Tum_Loglar_Loop_Analizli.xlsx` bir anlik log kaynagi olarak
+okunmaz. Calisma kitabindaki loop ve paralel degisim sayfalari, versiyonlu
+`fd750_loop/1.0.0` kural profilinin kaynagidir. Ham CSV/ingest verisi aynen
+saklanir; cikarsanan donguler, state segmentleri, tani olaylari ve turetilmis
+olcumler ayri tablolara yazilir.
+
+Temel yorum:
+
+- `850 +/- 0.5` raf hedefi "raf kapali" kodudur; veri hatasi degildir.
+- Aktif raf ve `VACUM < 2` START, devam eden aktif raf DRY olarak yorumlanir.
+- Raflarin kapanmasi veya `VACUM > 4` STOP gecisini baslatir.
+- STOP/WAIT sonrasinda en sicak gecerli `S1..S4 >= 0 C` ise DEFROST baslar.
+- DEFROST sirasinda `E.GUC < 5` ise DEFROST_STOP olur.
+- 180 dakikadan uzun veri boslugu proses zincirini resetler; 240 saniyelik
+  `time_gap` veri-kalitesi uyarisi bundan ayri tutulur.
+- S4-S2 ile vakumun 30 dakikalik paralel degisimi tani olayi olarak kaydedilir.
+
+Arayuzde **Analiz** sekmesi profil versiyonunu, son state'i, donguleri ve tani
+olaylarini gosterir. Grafik arka planindaki bantlar cikarsanan proses
+state'leridir.
 
 Internet uzerinden gelen veri hedeflenirse de varsayilan karar lokal-first
 kalir: uzaktaki kaynakla konusan adapter collector icinde veya collector'a
@@ -238,8 +290,10 @@ yakin bir katmanda yer alir, operator UI dogrudan o kaynaga baglanmaz.
 
 ## Veri Saklama
 
-Varsayilan SQLite dosyasi `data/freezedry.db` olarak olusur. Bu klasor ve
-veritabani dosyalari Git'e alinmaz. Migration ilk calismada su tablolari kurar:
+Standalone collector icin varsayilan SQLite dosyasi `data/freezedry.db` olarak
+olusur. Tauri masaustu uygulamasi varsayilan olarak isletim sisteminin uygulama
+veri klasorundeki `freezedry.db` dosyasini kullanir. Bu dosyalar Git'e alinmaz.
+Migration ilk calismada su tablolari kurar:
 
 - `runs`
 - `import_files`
@@ -250,13 +304,14 @@ veritabani dosyalari Git'e alinmaz. Migration ilk calismada su tablolari kurar:
 - `settings`
 - `csv_tail_sources`
 - `csv_tail_checkpoints`
+- `analysis_profiles`
+- `process_cycles`
+- `process_state_segments`
+- `diagnostic_events`
+- `derived_measurements`
 
-Recete/state katmani sonraki fazda ayrica eklenecek. Hedef modelde birden
-fazla recete ve recete versiyonu bulunabilir. Ham telemetry tablolari degismeden
-kalir; recete state'leri, state bazli kanal limitleri ve kosu icindeki state
-segmentleri ayri tablolarla tutulur. Makine aktif recete adimini disaridan
-gonderirse bu bilgi once ham `run_state_observations` kaydi olarak saklanir,
-sonra recete katalog state'leriyle eslestirilir. Bir kosu bir primary recete
-ile yorumlanabilir, ileride ayni kosu alternatif recete versiyonlariyla da
-karsilastirilabilir. Limit ihlalleri `quality_events` uzerinden grafikte ve
-uyari listesinde gosterilir.
+Makinenin `RECETE NO` ve `RECETE ADIM` kolonlari varsa ham
+`run_state_observations` olarak da saklanir. FD-750 kural motoru bu gozlemleri
+silmez veya kesin proses gercegi saymaz; sensorlerden cikardigi state zincirini
+ayri tutar. Boylece profil versiyonu degistiginde ham telemetry yeniden analiz
+edilebilir.

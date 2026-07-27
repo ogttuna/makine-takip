@@ -196,6 +196,10 @@ pub fn router_with_csv_tail(pool: SqlitePool, csv_tail: CsvTailManager) -> Route
             get(run_state_observations),
         )
         .route("/api/runs/{id}/state-segments", get(run_state_segments))
+        .route(
+            "/api/runs/{id}/analysis",
+            get(run_analysis).post(reanalyze_run),
+        )
         .route("/api/runs/{id}/quality-events", get(run_quality_events))
         .route("/api/runs/{id}/export.csv", get(export_run_csv))
         .fallback_service(static_files)
@@ -770,6 +774,43 @@ async fn run_state_segments(
     .await?;
 
     Ok(Json(StateSegmentsResponse { segments }))
+}
+
+async fn run_analysis(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<crate::analysis::RunAnalysisResponse>, ApiError> {
+    ensure_run_exists(&state.pool, id).await?;
+    let analysis = crate::analysis::fetch_run_analysis(&state.pool, id).await?;
+    Ok(Json(analysis))
+}
+
+async fn reanalyze_run(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<crate::analysis::RunAnalysisResponse>, ApiError> {
+    ensure_run_exists(&state.pool, id).await?;
+    crate::analysis::analyze_run(&state.pool, id)
+        .await
+        .map_err(ApiError::bad_request)?;
+    let analysis = crate::analysis::fetch_run_analysis(&state.pool, id).await?;
+    Ok(Json(analysis))
+}
+
+async fn ensure_run_exists(pool: &SqlitePool, id: i64) -> Result<(), ApiError> {
+    let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM runs WHERE id = ?1")
+        .bind(id)
+        .fetch_one(pool)
+        .await?
+        > 0;
+
+    if !exists {
+        return Err(ApiError::not_found(anyhow::anyhow!(
+            "run {id} was not found"
+        )));
+    }
+
+    Ok(())
 }
 
 async fn export_run_csv(

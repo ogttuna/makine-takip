@@ -12,7 +12,7 @@ async fn imports_fixture_csv_and_prevents_duplicates() {
     assert!(!first_report.duplicate);
     assert_eq!(first_report.row_count, 144);
     assert_eq!(first_report.channel_count, 10);
-    assert_eq!(first_report.warning_count, 11);
+    assert_eq!(first_report.warning_count, 7);
     assert_eq!(first_report.error_count, 0);
 
     let frame_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sample_frames")
@@ -38,7 +38,7 @@ async fn imports_fixture_csv_and_prevents_duplicates() {
     assert_eq!(frame_count, 144);
     assert_eq!(measurement_count, 1_440);
     assert_eq!(time_gap_count, 7);
-    assert_eq!(suspect_count, 4);
+    assert_eq!(suspect_count, 0);
 
     let second_report =
         collector::csv_import::import_csv_bytes(&pool, "LogFile_2026_01_26.csv", SAMPLE_CSV)

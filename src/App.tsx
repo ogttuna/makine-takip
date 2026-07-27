@@ -5,6 +5,7 @@ import {
   configureCsvTail,
   fetchCsvTailStatus,
   fetchQualityEvents,
+  fetchRunAnalysis,
   fetchRunSamples,
   fetchRuns,
   getCollectorUrl,
@@ -16,6 +17,7 @@ import {
 import type { ImportReport } from "./api";
 import { getChannelConfig } from "./channelConfig";
 import { ChartState } from "./components/StatusViews";
+import { AnalysisSummary } from "./features/analysis/AnalysisSummary";
 import {
   ChartArea,
   ChartModeControl,
@@ -85,6 +87,12 @@ export function App() {
     enabled: selectedRunId !== null,
     refetchInterval: selectedRunIsLive ? LIVE_REFETCH_INTERVAL_MS : false,
   });
+  const analysisQuery = useQuery({
+    queryKey: ["run-analysis", selectedRunId],
+    queryFn: () => fetchRunAnalysis(selectedRunId!),
+    enabled: selectedRunId !== null,
+    refetchInterval: selectedRunIsLive ? LIVE_REFETCH_INTERVAL_MS : false,
+  });
   const importMutation = useMutation({
     mutationFn: uploadCsv,
     onSuccess: async (report) => {
@@ -98,6 +106,9 @@ export function App() {
       await queryClient.invalidateQueries({
         queryKey: ["run-quality-events", report.run_id],
       });
+      await queryClient.invalidateQueries({
+        queryKey: ["run-analysis", report.run_id],
+      });
     },
   });
   const saveCsvTailMutation = useMutation({
@@ -110,6 +121,7 @@ export function App() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["csv-tail"] }),
         queryClient.invalidateQueries({ queryKey: ["runs"] }),
+        queryClient.invalidateQueries({ queryKey: ["run-analysis"] }),
       ]);
     },
   });
@@ -125,12 +137,14 @@ export function App() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["csv-tail"] }),
         queryClient.invalidateQueries({ queryKey: ["runs"] }),
+        queryClient.invalidateQueries({ queryKey: ["run-analysis"] }),
       ]);
     },
   });
 
   const samples = samplesQuery.data ?? [];
   const qualityEvents = qualityEventsQuery.data ?? [];
+  const analysis = analysisQuery.data ?? null;
   const copy = getCopy(locale);
   const rawChannelCodes = useMemo(() => getRawChannelCodes(samples), [samples]);
   const channelCodes = useMemo(
@@ -147,6 +161,7 @@ export function App() {
     runsQuery.isFetching ||
     samplesQuery.isFetching ||
     qualityEventsQuery.isFetching ||
+    analysisQuery.isFetching ||
     csvTailQuery.isFetching;
 
   useEffect(() => {
@@ -275,6 +290,9 @@ export function App() {
         queryClient.invalidateQueries({
           queryKey: ["run-quality-events", selectedRunId],
         }),
+        queryClient.invalidateQueries({
+          queryKey: ["run-analysis", selectedRunId],
+        }),
       ]);
     }
   };
@@ -362,6 +380,11 @@ export function App() {
                     onClick={() => setInspectorTab("quality")}
                   />
                   <InspectorTabButton
+                    active={inspectorTab === "analysis"}
+                    label={copy.operations.tabs.analysis}
+                    onClick={() => setInspectorTab("analysis")}
+                  />
+                  <InspectorTabButton
                     active={inspectorTab === "runs"}
                     label={copy.operations.tabs.runs}
                     onClick={() => setInspectorTab("runs")}
@@ -384,6 +407,17 @@ export function App() {
                     onFilterChange={setQualityFilter}
                     onRetry={() => qualityEventsQuery.refetch()}
                     visibleLimit={2}
+                  />
+                ) : null}
+
+                {inspectorTab === "analysis" ? (
+                  <AnalysisSummary
+                    analysis={analysis}
+                    copy={{ ...copy.analysis, retry: copy.common.retry }}
+                    error={analysisQuery.error}
+                    isLoading={analysisQuery.isLoading}
+                    locale={locale}
+                    onRetry={() => analysisQuery.refetch()}
                   />
                 ) : null}
 
@@ -471,6 +505,7 @@ export function App() {
             qualityEvents={qualityEvents}
             run={selectedRun}
             samples={samples}
+            analysis={analysis}
           />
 
           <div className="section-heading chart-heading">
@@ -528,6 +563,7 @@ export function App() {
               layout={chartLayout}
               locale={locale}
               qualityEvents={qualityEvents}
+              processSegments={analysis?.segments ?? []}
               samples={samples}
               themeMode={themeMode}
               visibleChannels={activeVisibleChannels}

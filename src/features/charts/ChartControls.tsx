@@ -1,6 +1,6 @@
 import { lazy, Suspense } from "react";
 
-import type { QualityEvent, SampleFrame } from "../../api";
+import type { ProcessStateSegment, QualityEvent, SampleFrame } from "../../api";
 import type { ChannelGroup } from "../../channelConfig";
 import { channelLabel, getChannelConfig, sortChannels } from "../../channelConfig";
 import { ChartState } from "../../components/StatusViews";
@@ -89,6 +89,7 @@ export function ChartArea({
   copy,
   layout,
   locale,
+  processSegments,
   qualityEvents,
   samples,
   themeMode,
@@ -97,6 +98,7 @@ export function ChartArea({
   copy: AppCopy["chart"];
   layout: ChartLayout;
   locale: Locale;
+  processSegments: ProcessStateSegment[];
   qualityEvents: QualityEvent[];
   samples: SampleFrame[];
   themeMode: ThemeMode;
@@ -117,6 +119,7 @@ export function ChartArea({
         {layout === "overlay" ? (
           <TelemetryChart
             locale={locale}
+            processSegments={processSegments}
             qualityEvents={qualityEvents}
             samples={samples}
             themeMode={themeMode}
@@ -135,6 +138,7 @@ export function ChartArea({
                 </div>
                 <TelemetryChart
                   locale={locale}
+                  processSegments={processSegments}
                   qualityEvents={qualityEvents}
                   samples={samples}
                   showSlider={false}

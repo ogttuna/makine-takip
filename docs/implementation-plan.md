@@ -4,6 +4,11 @@ Bu dokuman projenin sade, kullanisli ve web-oncelikli uygulama planidir.
 `initPlan.md` taslagindaki fikirler ve `LogFile_2026_01_26.csv` ornek verisi
 esas alinarak olusturulmustur.
 
+27 Temmuz 2026 revizyonu: Excel loop analiziyle `850` degerinin RAF kapali
+kodu oldugu kesinlestirildi ve gunluk CSV'lerin ayni fiziksel proses run'inda
+devam etmesi saglandi. Ayrintili guncel kurallar icin
+[fd750-analysis-rules.md](fd750-analysis-rules.md) esas alinmalidir.
+
 ## Urun Yonu
 
 Ilk hedef masaustu uygulamasi degil, lokal calisabilen web uygulamasidir.
@@ -69,7 +74,7 @@ Dosya: `LogFile_2026_01_26.csv`
 - Medyan ornekleme araligi: 180 saniye.
 - En uzun zaman boslugu: 967 saniye.
 - 240 saniyeden buyuk 7 bosluk var.
-- `RAF3` kanalinda 4 adet `850.0` degeri var.
+- `RAF3` kanalinda 4 adet `850.0` raf-kapali kodu var.
 - `VACUM` kanali hem `1.6E-05` seviyesinde hem de yaklasik `287`
   seviyesinde degerler iceriyor.
 - `SERP2` ve `SERP4` bu dosyada birebir ayni.
@@ -451,14 +456,15 @@ Baslangic kurallari:
 - Sayisal kolon parse edilemiyorsa satir import edilmez veya kanal `null`
   olarak isaretlenir; karar import ekraninda net raporlanir.
 - Ornekleme araligi medyanin belirgin ustundeyse `time_gap` event'i olusur.
-- `RAF3 = 850.0` simdilik `suspect` sayilir.
+- `RAF1..RAF4 = 850 +/- 0.5` raf-kapali kodudur; `suspect` sayilmaz.
 - `VACUM` icin bilimsel gosterim desteklenir.
 - `SERP2` ve `SERP4` ayni geldigi icin bu durum uyaridir, hata degildir.
 
 Grafikte:
 
-- Supheli `RAF3=850` ana sicaklik cizgisine dahil edilmemeli.
-- Ham deger tooltip veya uyari noktasi olarak gorulebilmeli.
+- `RAF=850` aktif raf ortalamasina dahil edilmemeli.
+- Ham `850` degeri DB/API'de korunmali; grafik olcegini bozmamasi icin hedef
+  cizgisinden cikarilmali.
 - Zaman bosluklarinda cizgi kesilmeli veya bosluk isareti gosterilmeli.
 
 ## Ekranlar
@@ -628,7 +634,7 @@ Makine bir CSV dosyasina surekli satir ekliyorsa:
 - Son okunan byte konumu saklanir.
 - Yeni satirlar okunur.
 - Yarim yazilmis satir bekletilir.
-- Yeni gunluk dosya olusursa eski run tamamlanir ve yeni run'a otomatik gecilir.
+- Yeni gunluk dosya olusursa ayni run korunarak yeni dosyaya otomatik gecilir.
 - Okunan satirlar dogrudan tabloya yazilmaz; ortak ingest modeline cevrilir.
 - Grafik X ekseni polling saatini degil CSV'deki `TARIH SAAT` degerini kullanir.
 - Atlanan olcum sonraki noktayi kaydirmaz; 240 saniyeyi asan aralik `time_gap`
@@ -755,7 +761,7 @@ Yapilacaklar:
 - Dosya SHA-256 hesapla.
 - Medyan ornekleme araligini hesapla.
 - 240 saniyeden buyuk bosluklari raporla.
-- `RAF3=850.0` degerlerini `suspect` olarak isaretle.
+- `RAF1..RAF4=850 +/- 0.5` degerlerini raf-kapali kodu olarak koru.
 
 Kabul:
 
@@ -765,7 +771,7 @@ Kabul:
   - baslangic `2026-01-26-11:08:17.626`
   - bitis `2026-01-26-18:51:16.967`
   - 7 adet 240 saniye ustu time gap
-  - 4 adet `RAF3=850.0` suspect
+  - 4 adet `RAF3=850.0` raf-kapali kodu, 0 suspect
 
 ### 3. Import API'sini Yaz
 
@@ -791,7 +797,7 @@ GET  /api/runs/:id/quality-events
   "run_id": 1,
   "file_sha256": "...",
   "row_count": 144,
-  "warning_count": 11,
+  "warning_count": 7,
   "error_count": 0,
   "started_at": "2026-01-26T11:08:17.626",
   "finished_at": "2026-01-26T18:51:16.967"
@@ -930,13 +936,14 @@ Yapilacaklar:
 
 - Kanal ac/kapat kontrolu ekle.
 - `VACUM` icin ayri eksen veya ayri panel kullan.
-- `RAF3=850` ana cizgide `null` olsun, ayri warning marker olarak gorunsun.
+- `RAF=850` aktif raf ortalamasindan cikarilsin ve ham hedef serisinde
+  raf-kapali kodu olarak ele alinsin.
 - Zaman bosluklarinda cizgi kesilsin.
 - Tooltip kalite bilgisini gostersin.
 
 Kabul:
 
-- `RAF3=850` grafigin olcegini bozmaz.
+- `RAF=850` grafigin olcegini ve aktif raf ortalamasini bozmaz.
 - 10 kanal secilebilir durumdadir.
 - Zoom ve tooltip calisir.
 
@@ -1020,11 +1027,11 @@ Ilk kullanisli surum su senaryoyu tamamlamali:
 
 1. Kullanici browser'dan `LogFile_2026_01_26.csv` dosyasini secer.
 2. Uygulama dosyayi upload eder ve import eder.
-3. Import raporu 144 satir, 7 time gap ve 4 suspect `RAF3` degeri gosterir.
+3. Import raporu 144 satir, 7 time gap ve 0 suspect degeri gosterir.
 4. Run gecmis listesine eklenir.
 5. Uygulama kapatip acinca run kaybolmaz.
 6. Grafik ekraninda tum kanallar incelenebilir.
-7. `RAF3=850` grafigi bozmaz.
+7. `RAF=850` raf-kapali kodu grafigi bozmaz.
 8. Zaman bosluklari fark edilir.
 9. Ayni dosya ikinci kez veri cogaltmaz.
 10. Vite dev server olmadan `http://127.0.0.1:4777` uzerinden lokal calisir.

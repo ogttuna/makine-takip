@@ -5,13 +5,13 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, anyhow, bail};
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
 use tokio::sync::{Mutex, Notify, RwLock, watch};
 use tokio::task::JoinHandle;
 
-use crate::csv_import::{ParsedCsv, import_csv_bytes, parse_csv_bytes};
+use crate::csv_import::{ParsedCsv, parse_csv_bytes};
 use crate::ingest::{
     AppendMeasurementRequest, AppendSampleRequest, AppendSamplesRequest, CreateRunRequest,
     append_samples, create_run,
@@ -386,20 +386,36 @@ impl CsvTailManager {
         };
 
         if let Some(active_path) = source.active_file_path.as_deref() {
-            if newest.path != active_path && read_header(Path::new(&newest.path))?.is_some() {
-                self.rotate_to(source, &newest.path).await?;
-            } else {
+            let pending_files = files
+                .iter()
+                .position(|file| file.path == active_path)
+                .map(|index| &files[index + 1..])
+                .unwrap_or_else(|| std::slice::from_ref(newest));
+
+            if pending_files.is_empty() {
                 self.tail_path(active_path, false).await?;
+            } else {
+                let mut rotated = false;
+
+                for file in pending_files {
+                    if read_header(Path::new(&file.path))?.is_none() {
+                        break;
+                    }
+
+                    let current_source = load_source(&self.inner.pool)
+                        .await?
+                        .ok_or_else(|| anyhow!("CSV tail source disappeared during rotation"))?;
+                    self.rotate_to(&current_source, &file.path).await?;
+                    rotated = true;
+                }
+
+                if !rotated {
+                    self.tail_path(active_path, false).await?;
+                }
             }
 
             self.set_runtime_status("tailing").await;
             return Ok(());
-        }
-
-        for file in files.iter().take(files.len().saturating_sub(1)) {
-            if let Err(error) = self.backfill_file(source.id, &file.path).await {
-                tracing::warn!(file_path = %file.path, %error, "historical CSV backfill failed");
-            }
         }
 
         if load_checkpoint(&self.inner.pool, &newest.path)
@@ -409,15 +425,59 @@ impl CsvTailManager {
             return Ok(());
         }
 
-        if read_header(Path::new(&newest.path))?.is_some() {
-            self.start_file(source.id, &newest.path).await?;
-            self.set_runtime_status("tailing").await;
+        if read_header(Path::new(&newest.path))?.is_none() {
+            return Ok(());
         }
+
+        let run_id = match source.active_run_id {
+            Some(run_id) => run_id,
+            None => {
+                let run_id = create_run(
+                    &self.inner.pool,
+                    CreateRunRequest {
+                        name: file_name(&newest.path)?,
+                        source_kind: "csv_tail".to_string(),
+                        source_name: Some(source.directory_path.clone()),
+                        started_at: None,
+                        notes: Some(
+                            "Continuous machine CSV stream; includes historical and daily files"
+                                .to_string(),
+                        ),
+                    },
+                )
+                .await?;
+
+                sqlx::query(
+                    "UPDATE csv_tail_sources SET active_run_id = ?2, updated_at = ?3 WHERE id = ?1",
+                )
+                .bind(source.id)
+                .bind(run_id)
+                .bind(now())
+                .execute(&self.inner.pool)
+                .await?;
+                run_id
+            }
+        };
+
+        for file in files.iter().take(files.len().saturating_sub(1)) {
+            self.backfill_file(source.id, run_id, &file.path)
+                .await
+                .with_context(|| format!("historical CSV backfill failed for `{}`", file.path))?;
+        }
+
+        self.start_file(source.id, &newest.path, Some(run_id))
+            .await?;
+        self.set_runtime_status("tailing").await;
 
         Ok(())
     }
 
-    async fn backfill_file(&self, source_id: i64, file_path: &str) -> anyhow::Result<()> {
+    async fn backfill_file(
+        &self,
+        source_id: i64,
+        run_id: i64,
+        file_path: &str,
+    ) -> anyhow::Result<()> {
         if load_checkpoint(&self.inner.pool, file_path)
             .await?
             .is_some()
@@ -428,7 +488,25 @@ impl CsvTailManager {
         let bytes = fs::read(file_path)
             .with_context(|| format!("failed to read historical CSV `{file_path}`"))?;
         let file_name = file_name(file_path)?;
-        let report = import_csv_bytes(&self.inner.pool, file_name, &bytes).await?;
+        let parsed = parse_csv_bytes(file_name, &bytes)?;
+        let sample_count = parsed.frames.len() as i64;
+        let first_sequence = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT MAX(source_row_number) FROM sample_frames WHERE run_id = ?1",
+        )
+        .bind(run_id)
+        .fetch_one(&self.inner.pool)
+        .await?
+        .unwrap_or(1)
+            + 1;
+
+        if sample_count > 0 {
+            append_samples(
+                &self.inner.pool,
+                run_id,
+                parsed_to_append_request(parsed, first_sequence),
+            )
+            .await?;
+        }
         let header_line = read_header(Path::new(file_path))?.map(|item| item.0);
 
         sqlx::query(
@@ -449,9 +527,9 @@ impl CsvTailManager {
         )
         .bind(source_id)
         .bind(file_path)
-        .bind(report.run_id)
+        .bind(run_id)
         .bind(bytes.len() as i64)
-        .bind(report.row_count as i64 + 1)
+        .bind(first_sequence + sample_count - 1)
         .bind(header_line)
         .bind(now())
         .execute(&self.inner.pool)
@@ -460,21 +538,40 @@ impl CsvTailManager {
         Ok(())
     }
 
-    async fn start_file(&self, source_id: i64, file_path: &str) -> anyhow::Result<()> {
+    async fn start_file(
+        &self,
+        source_id: i64,
+        file_path: &str,
+        existing_run_id: Option<i64>,
+    ) -> anyhow::Result<()> {
         let (header_line, header_offset) = read_header(Path::new(file_path))?
             .ok_or_else(|| anyhow!("CSV `{file_path}` does not contain a complete header"))?;
         let metadata = fs::metadata(file_path)?;
-        let run_id = create_run(
-            &self.inner.pool,
-            CreateRunRequest {
-                name: file_name(file_path)?,
-                source_kind: "csv_tail".to_string(),
-                source_name: Some(file_path.to_string()),
-                started_at: None,
-                notes: Some("Automatically tailed machine CSV".to_string()),
-            },
+        let run_id = match existing_run_id {
+            Some(run_id) => run_id,
+            None => {
+                create_run(
+                    &self.inner.pool,
+                    CreateRunRequest {
+                        name: file_name(file_path)?,
+                        source_kind: "csv_tail".to_string(),
+                        source_name: Some(file_path.to_string()),
+                        started_at: None,
+                        notes: Some(
+                            "Continuous machine CSV stream; may span daily files".to_string(),
+                        ),
+                    },
+                )
+                .await?
+            }
+        };
+        let last_source_sequence = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT MAX(source_row_number) FROM sample_frames WHERE run_id = ?1",
         )
-        .await?;
+        .bind(run_id)
+        .fetch_one(&self.inner.pool)
+        .await?
+        .unwrap_or(1);
 
         sqlx::query(
             r#"
@@ -489,11 +586,11 @@ impl CsvTailManager {
                 completed,
                 updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, 0, ?7)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)
             ON CONFLICT(source_id, file_path) DO UPDATE SET
                 run_id = excluded.run_id,
                 byte_offset = excluded.byte_offset,
-                last_source_sequence = 1,
+                last_source_sequence = excluded.last_source_sequence,
                 header_line = excluded.header_line,
                 file_size = excluded.file_size,
                 completed = 0,
@@ -504,6 +601,7 @@ impl CsvTailManager {
         .bind(file_path)
         .bind(run_id)
         .bind(header_offset as i64)
+        .bind(last_source_sequence)
         .bind(header_line)
         .bind(metadata.len() as i64)
         .bind(now())
@@ -542,19 +640,16 @@ impl CsvTailManager {
             .await?;
         }
 
-        if let Some(run_id) = source.active_run_id {
-            complete_run(&self.inner.pool, run_id).await?;
-        }
-
         sqlx::query(
-            "UPDATE csv_tail_sources SET active_file_path = NULL, active_run_id = NULL, updated_at = ?2 WHERE id = ?1",
+            "UPDATE csv_tail_sources SET active_file_path = NULL, updated_at = ?2 WHERE id = ?1",
         )
         .bind(source.id)
         .bind(now())
         .execute(&self.inner.pool)
         .await?;
 
-        self.start_file(source.id, new_path).await
+        self.start_file(source.id, new_path, source.active_run_id)
+            .await
     }
 
     async fn tail_path(&self, file_path: &str, accept_eof: bool) -> anyhow::Result<()> {
@@ -659,7 +754,15 @@ fn parsed_to_append_request(parsed: ParsedCsv, first_sequence: i64) -> AppendSam
             sampled_at: frame.sampled_at,
             source_timestamp_text: Some(frame.source_timestamp_text),
             source_sequence: Some(first_sequence + index as i64),
-            state_observation: None,
+            state_observation: frame.state_observation.map(|observation| {
+                crate::ingest::AppendStateObservationRequest {
+                    source_recipe_code: observation.source_recipe_code,
+                    source_recipe_version: observation.source_recipe_version,
+                    source_state_code: observation.source_state_code,
+                    source_state_name: observation.source_state_name,
+                    source_payload_json: observation.source_payload_json,
+                }
+            }),
             measurements: frame
                 .measurements
                 .into_iter()
@@ -803,6 +906,7 @@ async fn complete_run(pool: &SqlitePool, run_id: i64) -> anyhow::Result<()> {
 struct FileCandidate {
     path: String,
     modified: SystemTime,
+    log_date: Option<NaiveDate>,
 }
 
 fn discover_files(directory_path: &str, pattern: &str) -> anyhow::Result<Vec<FileCandidate>> {
@@ -827,15 +931,32 @@ fn discover_files(directory_path: &str, pattern: &str) -> anyhow::Result<Vec<Fil
         files.push(FileCandidate {
             path: entry.path().to_string_lossy().to_string(),
             modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            log_date: log_file_date(&file_name),
         });
     }
 
-    files.sort_by(|left, right| {
-        left.modified
-            .cmp(&right.modified)
-            .then_with(|| left.path.cmp(&right.path))
-    });
+    if files.iter().all(|file| file.log_date.is_some()) {
+        files.sort_by(|left, right| {
+            left.log_date
+                .cmp(&right.log_date)
+                .then_with(|| left.path.cmp(&right.path))
+        });
+    } else {
+        files.sort_by(|left, right| {
+            left.modified
+                .cmp(&right.modified)
+                .then_with(|| left.path.cmp(&right.path))
+        });
+    }
+
     Ok(files)
+}
+
+fn log_file_date(file_name: &str) -> Option<NaiveDate> {
+    let normalized = file_name.to_ascii_lowercase();
+    let date = normalized.strip_prefix("logfile_")?.strip_suffix(".csv")?;
+
+    NaiveDate::parse_from_str(date, "%Y_%m_%d").ok()
 }
 
 fn matches_pattern(file_name: &str, pattern: &str) -> bool {

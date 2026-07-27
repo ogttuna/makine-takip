@@ -33,6 +33,7 @@ export const COPY = {
       close: "Kapat",
       tabs: {
         quality: "Uyarılar",
+        analysis: "Analiz",
         runs: "Koşular",
         source: "Kaynak",
       },
@@ -51,10 +52,13 @@ export const COPY = {
       noWarning: "Uyarı yok",
       qualityValue: (gap: number, suspect: number) => `${gap} boşluk / ${suspect} şüpheli`,
       activeSignals: (count: number) => `${count} aktif sinyal`,
+      inferredState: "Proses durumu",
+      noState: "Henüz çıkarılmadı",
+      loop: (loopNumber: number) => `Loop ${loopNumber}`,
     },
     chart: {
       title: "Proses grafiği",
-      subtitle: "Raf, basınç, vakum ve soğutma sinyalleri",
+      subtitle: "Raf hedefleri, sıcaklıklar, basınç, vakum ve yardımcı sinyaller",
       modeLabel: "Görünüm",
       modeAria: "Grafik düzeni",
       overlay: "Üst üste",
@@ -62,7 +66,8 @@ export const COPY = {
       loadingTitle: "Grafik yükleniyor",
       loadingMessage: "Grafik alanı hazırlanıyor.",
       unitAssumptionTitle: "Birim varsayımı",
-      unitAssumptionBody: "Raf, soğutma ve kondenser değerleri °C olarak işaretlendi.",
+      unitAssumptionBody:
+        "Raf hedefleri, S1-S4 ve kondenser °C; 850 ±0,5 kapalı raf kodudur.",
       unitCheckTitle: "Birim kontrolü",
       unitCheckBody: (channels: string) =>
         `Sıcaklık kanalları °C kabul edildi; ${channels} birimi doğrulanmalı.`,
@@ -79,8 +84,8 @@ export const COPY = {
       },
       groups: {
         shelf: {
-          title: "Raflar",
-          note: "Raf probları ve türetilmiş raf ortalaması",
+          title: "Raf hedefleri",
+          note: "Aktif raf komutları; 850 ±0,5 kapalı kabul edilir",
         },
         pressure: {
           title: "Basınç",
@@ -91,8 +96,8 @@ export const COPY = {
           note: "Log ölçekte vakum kanalı",
         },
         cooling: {
-          title: "Soğutma",
-          note: "Soğutma ve kondenser kanalları",
+          title: "Sıcaklık sensörleri",
+          note: "S1-S4 konum sıcaklıkları ve kondenser",
         },
         other: {
           title: "Diğer",
@@ -148,6 +153,38 @@ export const COPY = {
         `${channel} ${value} değeri gönderdi. Bu değer cihazın özel hata değeri gibi işaretlendi.`,
       genericTitle: "Veri uyarısı",
     },
+    analysis: {
+      profile: "Kural profili",
+      currentState: "Çıkarılan durum",
+      noState: "Durum bulunamadı",
+      noLoop: "Aktif loop yok",
+      loop: (loopNumber: number) => `Loop ${loopNumber}`,
+      loading: "FD-750 analizi yükleniyor...",
+      loadError: "FD-750 analizi yüklenemedi",
+      empty: "Seçili koşu için analiz sonucu yok.",
+      cycles: "Loop özeti",
+      cycleCount: (count: number) => `${count} loop`,
+      noCycles: "Henüz START koşulu bulunamadı.",
+      recovery: "S4 düzelme",
+      rise: "S4/vakum yükselme",
+      resets: "Zincir reseti",
+      durationUnknown: "Süre yok",
+      durationHours: (hours: number) => `${hours.toFixed(1)} saat`,
+      statuses: {
+        active: "Aktif",
+        completed: "Tamamlandı",
+        interrupted: "Kesintili",
+        incomplete: "Eksik",
+      },
+      states: {
+        START: "START",
+        DRY: "DRY",
+        STOP: "STOP",
+        WAIT: "WAIT",
+        DEFROST: "DEFROST",
+        DEFROST_STOP: "DEFROST STOP",
+      },
+    },
     runs: {
       title: "Kayıtlı Koşular",
       count: (count: number) => `${count} kayıt`,
@@ -171,6 +208,16 @@ export const COPY = {
       pathPlaceholder: "C:\\MachineLogs\\FreezeDryer",
       pathHint:
         "Bu path collector'ın çalıştığı fabrika PC'sine aittir; klasör 30 saniyede bir kontrol edilir.",
+      dropTitle: "CSV klasörünü buraya sürükle",
+      dropRelease: "Klasörü bırak ve izlemeyi başlat",
+      dropHint:
+        "Masaüstü uygulamasında bırakınca klasör kaydedilir ve izleme otomatik başlar.",
+      dropStarting: "Klasör doğrulanıyor ve canlı izleme başlatılıyor...",
+      dropStarted: "Klasör kaydedildi; günlük CSV akışı izleniyor.",
+      dropSingleFolder: "Tek seferde yalnızca bir CSV klasörü bırak.",
+      dropUnavailable: "Masaüstü klasör bırakma özelliği başlatılamadı.",
+      dropBrowserLimitation:
+        "Tarayıcı klasörün tam yolunu paylaşmaz. Masaüstü uygulamasını kullan veya yukarıdaki alana fabrika PC'sindeki klasör yolunu yapıştır.",
       saveAndStart: "Kaydet ve başlat",
       working: "İşleniyor...",
       stop: "Durdur",
@@ -237,6 +284,7 @@ export const COPY = {
       close: "Close",
       tabs: {
         quality: "Warnings",
+        analysis: "Analysis",
         runs: "Runs",
         source: "Source",
       },
@@ -255,10 +303,13 @@ export const COPY = {
       noWarning: "No warnings",
       qualityValue: (gap: number, suspect: number) => `${gap} gaps / ${suspect} suspect`,
       activeSignals: (count: number) => `${count} active signals`,
+      inferredState: "Process state",
+      noState: "Not inferred yet",
+      loop: (loopNumber: number) => `Loop ${loopNumber}`,
     },
     chart: {
       title: "Process graph",
-      subtitle: "Shelf, pressure, vacuum, and cooling signals",
+      subtitle: "Shelf targets, temperatures, pressure, vacuum, and auxiliary signals",
       modeLabel: "View",
       modeAria: "Chart layout",
       overlay: "Overlay",
@@ -266,7 +317,8 @@ export const COPY = {
       loadingTitle: "Loading chart",
       loadingMessage: "Preparing chart area.",
       unitAssumptionTitle: "Unit assumption",
-      unitAssumptionBody: "Shelf, cooling, and condenser values are marked as °C.",
+      unitAssumptionBody:
+        "Shelf targets, S1-S4, and condenser use °C; 850 ±0.5 means shelf off.",
       unitCheckTitle: "Unit check",
       unitCheckBody: (channels: string) =>
         `Temperature channels are treated as °C; verify units for ${channels}.`,
@@ -283,8 +335,8 @@ export const COPY = {
       },
       groups: {
         shelf: {
-          title: "Shelves",
-          note: "Shelf probes and derived shelf average",
+          title: "Shelf targets",
+          note: "Active shelf commands; 850 ±0.5 is treated as off",
         },
         pressure: {
           title: "Pressure",
@@ -295,8 +347,8 @@ export const COPY = {
           note: "Vacuum channel on log scale",
         },
         cooling: {
-          title: "Cooling",
-          note: "Cooling and condenser channels",
+          title: "Temperature sensors",
+          note: "S1-S4 position temperatures and condenser",
         },
         other: {
           title: "Other",
@@ -352,6 +404,38 @@ export const COPY = {
         `${channel} reported ${value}. This was marked as a device-specific error value.`,
       genericTitle: "Data warning",
     },
+    analysis: {
+      profile: "Rule profile",
+      currentState: "Inferred state",
+      noState: "No state inferred",
+      noLoop: "No active loop",
+      loop: (loopNumber: number) => `Loop ${loopNumber}`,
+      loading: "Loading FD-750 analysis...",
+      loadError: "FD-750 analysis could not be loaded",
+      empty: "No analysis result for the selected run.",
+      cycles: "Loop summary",
+      cycleCount: (count: number) => `${count} loops`,
+      noCycles: "No START condition detected yet.",
+      recovery: "S4 recovery",
+      rise: "S4/vacuum rise",
+      resets: "Chain resets",
+      durationUnknown: "No duration",
+      durationHours: (hours: number) => `${hours.toFixed(1)} hours`,
+      statuses: {
+        active: "Active",
+        completed: "Completed",
+        interrupted: "Interrupted",
+        incomplete: "Incomplete",
+      },
+      states: {
+        START: "START",
+        DRY: "DRY",
+        STOP: "STOP",
+        WAIT: "WAIT",
+        DEFROST: "DEFROST",
+        DEFROST_STOP: "DEFROST STOP",
+      },
+    },
     runs: {
       title: "Recorded runs",
       count: (count: number) => `${count} records`,
@@ -375,6 +459,16 @@ export const COPY = {
       pathPlaceholder: "C:\\MachineLogs\\FreezeDryer",
       pathHint:
         "This path belongs to the factory PC running the collector; the folder is checked every 30 seconds.",
+      dropTitle: "Drop the CSV folder here",
+      dropRelease: "Release to start watching",
+      dropHint:
+        "In the desktop app, dropping the folder saves it and starts monitoring automatically.",
+      dropStarting: "Validating the folder and starting live monitoring...",
+      dropStarted: "Folder saved; the daily CSV stream is being monitored.",
+      dropSingleFolder: "Drop only one CSV folder at a time.",
+      dropUnavailable: "Desktop folder drop could not be initialized.",
+      dropBrowserLimitation:
+        "A browser does not expose the folder's full path. Use the desktop app or paste the factory PC folder path above.",
       saveAndStart: "Save and start",
       working: "Working...",
       stop: "Stop",
