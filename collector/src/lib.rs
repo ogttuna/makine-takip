@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod browser_tail;
 pub mod config;
 pub mod csv_import;
 pub mod csv_tail;

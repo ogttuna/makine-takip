@@ -2,16 +2,11 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  configureCsvTail,
-  fetchCsvTailStatus,
   fetchQualityEvents,
   fetchRunAnalysis,
   fetchRunSamples,
   fetchRuns,
   getCollectorUrl,
-  rescanCsvTail,
-  startCsvTail,
-  stopCsvTail,
   uploadCsv,
 } from "./api";
 import type { ImportReport } from "./api";
@@ -41,6 +36,7 @@ import {
   type QualityFilter,
   type ThemeMode,
 } from "./types";
+import { useBrowserCsvTail } from "./useBrowserCsvTail";
 
 const THEME_STORAGE_KEY = "freezedry.theme";
 const LOCALE_STORAGE_KEY = "freezedry.locale";
@@ -59,15 +55,29 @@ export function App() {
   const [lastImportReport, setLastImportReport] = useState<ImportReport | null>(null);
   const [followLive, setFollowLive] = useState(true);
   const operationsMenuRef = useRef<HTMLDivElement>(null);
+  const browserTail = useBrowserCsvTail({
+    onSynced: (runId, insertedCount) => {
+      if (runId !== null) {
+        setFollowLive(true);
+        setSelectedRunId(runId);
+        void queryClient.invalidateQueries({ queryKey: ["runs"] });
+      }
+
+      if (runId !== null && insertedCount > 0) {
+        void queryClient.invalidateQueries({ queryKey: ["run-samples", runId] });
+        void queryClient.invalidateQueries({
+          queryKey: ["run-quality-events", runId],
+        });
+        void queryClient.invalidateQueries({
+          queryKey: ["run-analysis", runId],
+        });
+      }
+    },
+  });
 
   const runsQuery = useQuery({
     queryKey: ["runs"],
     queryFn: fetchRuns,
-    refetchInterval: LIVE_REFETCH_INTERVAL_MS,
-  });
-  const csvTailQuery = useQuery({
-    queryKey: ["csv-tail"],
-    queryFn: fetchCsvTailStatus,
     refetchInterval: LIVE_REFETCH_INTERVAL_MS,
   });
   const selectedRun = useMemo(
@@ -111,37 +121,6 @@ export function App() {
       });
     },
   });
-  const saveCsvTailMutation = useMutation({
-    mutationFn: async (payload: Parameters<typeof configureCsvTail>[0]) => {
-      await configureCsvTail(payload);
-      return startCsvTail();
-    },
-    onSuccess: async () => {
-      setFollowLive(true);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["csv-tail"] }),
-        queryClient.invalidateQueries({ queryKey: ["runs"] }),
-        queryClient.invalidateQueries({ queryKey: ["run-analysis"] }),
-      ]);
-    },
-  });
-  const stopCsvTailMutation = useMutation({
-    mutationFn: stopCsvTail,
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["csv-tail"] });
-    },
-  });
-  const rescanCsvTailMutation = useMutation({
-    mutationFn: rescanCsvTail,
-    onSuccess: async () => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["csv-tail"] }),
-        queryClient.invalidateQueries({ queryKey: ["runs"] }),
-        queryClient.invalidateQueries({ queryKey: ["run-analysis"] }),
-      ]);
-    },
-  });
-
   const samples = samplesQuery.data ?? [];
   const qualityEvents = qualityEventsQuery.data ?? [];
   const analysis = analysisQuery.data ?? null;
@@ -162,10 +141,10 @@ export function App() {
     samplesQuery.isFetching ||
     qualityEventsQuery.isFetching ||
     analysisQuery.isFetching ||
-    csvTailQuery.isFetching;
+    browserTail.state.status === "scanning";
 
   useEffect(() => {
-    const activeRunId = csvTailQuery.data?.active_run_id;
+    const activeRunId = browserTail.state.activeRunId;
 
     if (!followLive || activeRunId === null || activeRunId === undefined) {
       return;
@@ -180,7 +159,7 @@ export function App() {
       setSelectedRunId(activeRunId);
     }
   }, [
-    csvTailQuery.data?.active_run_id,
+    browserTail.state.activeRunId,
     followLive,
     queryClient,
     runsQuery.data,
@@ -279,9 +258,9 @@ export function App() {
       ? copy.connection.syncing
       : copy.connection.connected;
   const refreshData = async () => {
+    await browserTail.rescan();
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["runs"] }),
-      queryClient.invalidateQueries({ queryKey: ["csv-tail"] }),
     ]);
 
     if (selectedRunId !== null) {
@@ -451,34 +430,17 @@ export function App() {
                   <div className="operations-panel-section">
                     <CsvTailPanel
                       copy={copy.csvTail}
-                      error={
-                        saveCsvTailMutation.error ??
-                        stopCsvTailMutation.error ??
-                        rescanCsvTailMutation.error ??
-                        csvTailQuery.error
-                      }
-                      isBusy={
-                        saveCsvTailMutation.isPending ||
-                        stopCsvTailMutation.isPending ||
-                        rescanCsvTailMutation.isPending
-                      }
-                      isLoading={csvTailQuery.isLoading}
                       locale={locale}
+                      onChoose={browserTail.chooseDirectory}
                       onFollowActive={(runId) => {
                         setFollowLive(true);
                         setSelectedRunId(runId);
                         setOperationsMenuOpen(false);
                       }}
-                      onRescan={async () => {
-                        await rescanCsvTailMutation.mutateAsync();
-                      }}
-                      onSaveAndStart={async (payload) => {
-                        await saveCsvTailMutation.mutateAsync(payload);
-                      }}
-                      onStop={async () => {
-                        await stopCsvTailMutation.mutateAsync();
-                      }}
-                      status={csvTailQuery.data ?? null}
+                      onRescan={browserTail.rescan}
+                      onResume={browserTail.resume}
+                      onStop={browserTail.stop}
+                      state={browserTail.state}
                     />
                     <RunActions copy={copy.source} locale={locale} run={selectedRun} />
                     <ImportPanel

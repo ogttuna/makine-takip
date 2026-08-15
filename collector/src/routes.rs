@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Row, SqlitePool};
 use tower_http::services::{ServeDir, ServeFile};
 
+use crate::browser_tail::{
+    BrowserTailChunkRequest, BrowserTailChunkResponse, BrowserTailOpenRequest, BrowserTailStatus,
+};
 use crate::csv_import::{ImportReport, import_csv_bytes};
 use crate::csv_tail::{CsvTailConfigRequest, CsvTailManager, CsvTailStatus};
 use crate::ingest::{AppendSamplesReport, AppendSamplesRequest, CreateRunRequest};
@@ -182,6 +185,9 @@ pub fn router_with_csv_tail(pool: SqlitePool, csv_tail: CsvTailManager) -> Route
         .route("/api/csv-tail/start", post(start_csv_tail))
         .route("/api/csv-tail/stop", post(stop_csv_tail))
         .route("/api/csv-tail/rescan", post(rescan_csv_tail))
+        .route("/api/browser-tail/{source_id}", get(browser_tail_status))
+        .route("/api/browser-tail/open", post(open_browser_tail_file))
+        .route("/api/browser-tail/chunk", post(sync_browser_tail_chunk))
         .route("/api/imports/csv", post(import_csv))
         .route("/api/imports/{id}", get(import_status))
         .route("/api/runs", get(runs).post(create_run))
@@ -255,6 +261,39 @@ async fn stop_csv_tail(State(state): State<AppState>) -> Result<Json<CsvTailStat
 
 async fn rescan_csv_tail(State(state): State<AppState>) -> Result<Json<CsvTailStatus>, ApiError> {
     Ok(Json(state.csv_tail.rescan().await?))
+}
+
+async fn browser_tail_status(
+    State(state): State<AppState>,
+    Path(source_id): Path<String>,
+) -> Result<Json<BrowserTailStatus>, ApiError> {
+    Ok(Json(
+        crate::browser_tail::source_status(&state.pool, &source_id)
+            .await
+            .map_err(ApiError::not_found)?,
+    ))
+}
+
+async fn open_browser_tail_file(
+    State(state): State<AppState>,
+    Json(request): Json<BrowserTailOpenRequest>,
+) -> Result<Json<BrowserTailStatus>, ApiError> {
+    Ok(Json(
+        crate::browser_tail::open_file(&state.pool, request)
+            .await
+            .map_err(ApiError::bad_request)?,
+    ))
+}
+
+async fn sync_browser_tail_chunk(
+    State(state): State<AppState>,
+    Json(request): Json<BrowserTailChunkRequest>,
+) -> Result<Json<BrowserTailChunkResponse>, ApiError> {
+    Ok(Json(
+        crate::browser_tail::sync_chunk(&state.pool, request)
+            .await
+            .map_err(ApiError::bad_request)?,
+    ))
 }
 
 async fn import_csv(

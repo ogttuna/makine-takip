@@ -1,0 +1,68 @@
+name: makinetakip
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        VITE_COLLECTOR_URL: ""
+    image: makinetakip-app:latest
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      FREEZEDRY_BIND_ADDR: 0.0.0.0:4777
+      FREEZEDRY_DB_URL: sqlite:///data/freezedry.db
+      RUST_LOG: collector=info,tower_http=info
+      TZ: Europe/Istanbul
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:4777/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - data:/data
+    networks:
+      - internal
+
+  backup:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backup-runtime
+    image: makinetakip-backup:latest
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      BACKUP_INTERVAL: "86400"
+      BACKUP_RETENTION_DAYS: "60"
+      BACKUP_RETENTION_MARKER: /backup/.retention-start
+      TZ: Europe/Istanbul
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - data:/data:ro
+      - backup_data:/backup
+    networks:
+      - internal
+
+networks:
+  internal:
+    name: makinetakip_net
+    ipam:
+      config:
+        - subnet: 10.255.252.0/24
+
+volumes:
+  data:
+    name: makinetakip_data
+  backup_data:
+    name: makinetakip_backup_data

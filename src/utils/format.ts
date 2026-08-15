@@ -62,7 +62,7 @@ export function sourceKindLabel(sourceKind: string, locale: Locale = "tr"): stri
     return locale === "en" ? "CSV import" : "CSV içe aktarma";
   }
 
-  if (sourceKind === "csv_tail") {
+  if (sourceKind === "csv_tail" || sourceKind === "browser_csv_tail") {
     return locale === "en" ? "Live CSV" : "Canlı CSV";
   }
 

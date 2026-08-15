@@ -1,0 +1,12 @@
+.git
+.gitignore
+node_modules
+dist
+target
+src-tauri/target
+*.log
+.env
+.env.*
+fixtures
+docs
+initPlan.md

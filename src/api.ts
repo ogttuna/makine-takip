@@ -190,6 +190,26 @@ export const csvTailStatusSchema = z.object({
   last_error: z.string().nullable(),
 });
 
+export const browserTailStatusSchema = z.object({
+  source_id: z.string(),
+  source_name: z.string(),
+  active_file_name: z.string().nullable(),
+  active_run_id: z.number().nullable(),
+  byte_offset: z.number().nullable(),
+  last_source_sequence: z.number().nullable(),
+  file_size: z.number().nullable(),
+  last_modified_ms: z.number().nullable(),
+  completed: z.boolean().nullable(),
+  last_sampled_at: z.string().nullable(),
+  last_seen_at: z.string().nullable(),
+});
+
+export const browserTailChunkResponseSchema = browserTailStatusSchema.extend({
+  inserted_count: z.number(),
+  skipped_count: z.number(),
+  replayed: z.boolean(),
+});
+
 export type ImportReport = z.infer<typeof importReportSchema>;
 export type RunSummary = z.infer<typeof runSummarySchema>;
 export type Measurement = z.infer<typeof measurementSchema>;
@@ -204,12 +224,31 @@ export type DiagnosticEvent = z.infer<typeof diagnosticEventSchema>;
 export type RunAnalysis = z.infer<typeof runAnalysisSchema>;
 export type AppendSamplesReport = z.infer<typeof appendSamplesReportSchema>;
 export type CsvTailStatus = z.infer<typeof csvTailStatusSchema>;
+export type BrowserTailStatus = z.infer<typeof browserTailStatusSchema>;
+export type BrowserTailChunkResponse = z.infer<typeof browserTailChunkResponseSchema>;
 
 export type CsvTailConfigPayload = {
   name?: string;
   directory_path: string;
   file_pattern?: string;
   scan_interval_ms?: number;
+};
+
+export type BrowserTailOpenPayload = {
+  source_id: string;
+  source_name: string;
+  file_name: string;
+  header_line: string;
+  header_end_offset: number;
+  file_size: number;
+  last_modified_ms: number;
+};
+
+export type BrowserTailChunkPayload = {
+  source_id: string;
+  file_name: string;
+  offset: number;
+  rows_text: string;
 };
 
 export type CreateRunPayload = {
@@ -428,6 +467,37 @@ export async function fetchQualityEvents(runId: number): Promise<QualityEvent[]>
 export async function fetchCsvTailStatus(): Promise<CsvTailStatus> {
   const payload = await getJson(`${apiBaseUrl}/api/csv-tail`);
   return csvTailStatusSchema.parse(payload);
+}
+
+export async function fetchBrowserTailStatus(
+  sourceId: string,
+): Promise<BrowserTailStatus | null> {
+  const response = await fetch(
+    `${apiBaseUrl}/api/browser-tail/${encodeURIComponent(sourceId)}`,
+  );
+
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    throw new Error(await responseMessage(response));
+  }
+
+  return browserTailStatusSchema.parse(await response.json());
+}
+
+export async function openBrowserTailFile(
+  payload: BrowserTailOpenPayload,
+): Promise<BrowserTailStatus> {
+  const response = await postJson(`${apiBaseUrl}/api/browser-tail/open`, payload);
+  return browserTailStatusSchema.parse(response);
+}
+
+export async function syncBrowserTailChunk(
+  payload: BrowserTailChunkPayload,
+): Promise<BrowserTailChunkResponse> {
+  const response = await postJson(`${apiBaseUrl}/api/browser-tail/chunk`, payload);
+  return browserTailChunkResponseSchema.parse(response);
 }
 
 export async function configureCsvTail(

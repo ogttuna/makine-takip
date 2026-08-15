@@ -1077,6 +1077,17 @@ h2 {
   color: var(--alarm);
 }
 
+.source-status.offline,
+.source-status.permission_required {
+  border-color: color-mix(in srgb, var(--warning) 52%, var(--border));
+  color: var(--warning);
+}
+
+.source-status.unsupported {
+  border-color: color-mix(in srgb, var(--alarm) 52%, var(--border));
+  color: var(--alarm);
+}
+
 .csv-tail-form,
 .csv-tail-form label {
   display: grid;
@@ -1122,7 +1133,8 @@ h2 {
   background: color-mix(in srgb, var(--accent) 10%, var(--surface-2));
 }
 
-.csv-folder-drop strong {
+.csv-folder-drop strong,
+.selected-directory strong {
   color: var(--text-1);
   font-size: 0.82rem;
 }
@@ -1141,6 +1153,25 @@ h2 {
   line-height: 1.4;
 }
 
+.selected-directory {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-control);
+  background: var(--surface-2);
+  padding: 9px 10px;
+}
+
+.selected-directory span {
+  color: var(--text-2);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.selected-directory strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .csv-tail-actions {
   display: flex;
   flex-wrap: wrap;

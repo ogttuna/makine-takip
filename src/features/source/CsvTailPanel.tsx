@@ -1,159 +1,28 @@
-import { isTauri } from "@tauri-apps/api/core";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { useCallback, useEffect, useRef, useState } from "react";
-
-import type { CsvTailConfigPayload, CsvTailStatus } from "../../api";
 import type { AppCopy, Locale } from "../../i18n";
+import type { BrowserCsvTailState } from "../../useBrowserCsvTail";
 import { formatDate } from "../../utils/format";
-import {
-  physicalPointIsInsideBounds,
-  singleDroppedPath,
-} from "./folderDrop";
 
 export function CsvTailPanel({
   copy,
-  error,
-  isBusy,
-  isLoading,
   locale,
+  onChoose,
   onFollowActive,
   onRescan,
-  onSaveAndStart,
+  onResume,
   onStop,
-  status,
+  state,
 }: {
   copy: AppCopy["csvTail"];
-  error: Error | null;
-  isBusy: boolean;
-  isLoading: boolean;
   locale: Locale;
+  onChoose: () => Promise<void>;
   onFollowActive: (runId: number) => void;
   onRescan: () => Promise<void>;
-  onSaveAndStart: (payload: CsvTailConfigPayload) => Promise<void>;
-  onStop: () => Promise<void>;
-  status: CsvTailStatus | null;
+  onResume: () => Promise<void>;
+  onStop: () => void;
+  state: BrowserCsvTailState;
 }) {
-  const [directoryPath, setDirectoryPath] = useState("");
-  const [isDirty, setIsDirty] = useState(false);
-  const [isFolderDragActive, setIsFolderDragActive] = useState(false);
-  const [dropError, setDropError] = useState<string | null>(null);
-  const [dropNotice, setDropNotice] = useState<string | null>(null);
-  const dropZoneRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!isDirty && status?.directory_path) {
-      setDirectoryPath(status.directory_path);
-    }
-  }, [isDirty, status?.directory_path]);
-
-  const activeFileName = status?.active_file_path
-    ? status.active_file_path.split(/[\\/]/).pop()
-    : null;
-  const statusLabel = copy.statuses[status?.status ?? "stopped"];
-  const startDroppedFolder = useCallback(
-    async (paths: string[]) => {
-      if (isBusy) {
-        return;
-      }
-
-      const path = singleDroppedPath(paths);
-
-      if (!path) {
-        setDropNotice(null);
-        setDropError(copy.dropSingleFolder);
-        return;
-      }
-
-      setDirectoryPath(path);
-      setIsDirty(true);
-      setDropError(null);
-      setDropNotice(copy.dropStarting);
-
-      try {
-        await onSaveAndStart({
-          directory_path: path,
-          file_pattern: "*.csv",
-          name: "Freeze dryer CSV",
-          scan_interval_ms: 30_000,
-        });
-        setIsDirty(false);
-        setDropNotice(copy.dropStarted);
-      } catch {
-        setDropNotice(null);
-      }
-    },
-    [
-      copy.dropSingleFolder,
-      copy.dropStarted,
-      copy.dropStarting,
-      isBusy,
-      onSaveAndStart,
-    ],
-  );
-
-  useEffect(() => {
-    if (!isTauri()) {
-      return;
-    }
-
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-
-    void getCurrentWebview()
-      .onDragDropEvent((event) => {
-        if (event.payload.type === "enter" || event.payload.type === "over") {
-          setIsFolderDragActive(
-            pointIsInsideDropZone(event.payload.position, dropZoneRef.current),
-          );
-          return;
-        }
-
-        setIsFolderDragActive(false);
-
-        if (
-          event.payload.type === "drop" &&
-          pointIsInsideDropZone(event.payload.position, dropZoneRef.current)
-        ) {
-          void startDroppedFolder(event.payload.paths);
-        }
-      })
-      .then((stopListening) => {
-        if (disposed) {
-          stopListening();
-        } else {
-          unlisten = stopListening;
-        }
-      })
-      .catch(() => {
-        setDropError(copy.dropUnavailable);
-      });
-
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, [copy.dropUnavailable, startDroppedFolder]);
-
-  const handleBrowserDrop = (event: React.DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    setIsFolderDragActive(false);
-
-    if (isTauri()) {
-      return;
-    }
-
-    const droppedFile = event.dataTransfer.files[0] as
-      | (File & { path?: string })
-      | undefined;
-
-    if (droppedFile?.path) {
-      void startDroppedFolder([droppedFile.path]);
-      return;
-    }
-
-    setDropNotice(null);
-    setDropError(copy.dropBrowserLimitation);
-  };
+  const isBusy = state.status === "scanning";
+  const needsResume = state.configured && !state.enabled;
 
   return (
     <section className="csv-tail-panel">
@@ -162,156 +31,102 @@ export function CsvTailPanel({
           <h2>{copy.title}</h2>
           <p>{copy.subtitle}</p>
         </div>
-        <span className={`source-status ${status?.status ?? "stopped"}`}>
-          {isLoading ? copy.loading : statusLabel}
+        <span className={`source-status ${state.status}`}>
+          {copy.statuses[state.status]}
         </span>
       </div>
 
-      <form
-        className="csv-tail-form"
-        onSubmit={async (event) => {
-          event.preventDefault();
-          try {
-            await onSaveAndStart({
-              directory_path: directoryPath,
-              file_pattern: "*.csv",
-              name: "Freeze dryer CSV",
-              scan_interval_ms: 30_000,
-            });
-            setIsDirty(false);
-          } catch {
-            // The mutation error is rendered inline below the form.
-          }
-        }}
-      >
-        <label>
-          <span>{copy.pathLabel}</span>
-          <input
-            disabled={isBusy}
-            onChange={(event) => {
-              setDirectoryPath(event.target.value);
-              setIsDirty(true);
-            }}
-            placeholder={copy.pathPlaceholder}
-            required
-            type="text"
-            value={directoryPath}
-          />
-        </label>
-        <small>{copy.pathHint}</small>
-        <div
-          className={
-            isFolderDragActive
-              ? "csv-folder-drop active"
-              : "csv-folder-drop"
-          }
-          onDragEnter={(event) => {
-            event.preventDefault();
-            setIsFolderDragActive(true);
-          }}
-          onDragLeave={(event) => {
-            event.preventDefault();
-            setIsFolderDragActive(false);
-          }}
-          onDragOver={(event) => {
-            event.preventDefault();
-            setIsFolderDragActive(true);
-          }}
-          onDrop={handleBrowserDrop}
-          ref={dropZoneRef}
-        >
-          <strong>
-            {isFolderDragActive ? copy.dropRelease : copy.dropTitle}
-          </strong>
-          <span>{copy.dropHint}</span>
+      <div className="csv-tail-form">
+        <div className="selected-directory">
+          <span>{copy.directoryLabel}</span>
+          <strong>{state.directoryName ?? copy.noDirectory}</strong>
         </div>
-        {dropNotice ? (
-          <p className="csv-folder-drop-notice" role="status">
-            {dropNotice}
-          </p>
-        ) : null}
-        {dropError ? (
-          <p className="error-text" role="alert">
-            {dropError}
-          </p>
-        ) : null}
+        <small>{copy.pathHint}</small>
         <div className="csv-tail-actions">
-          <button className="export-link" disabled={isBusy} type="submit">
-            {isBusy ? copy.working : copy.saveAndStart}
-          </button>
-          {status?.enabled ? (
+          {!state.configured ? (
             <button
-              className="ghost-button"
-              disabled={isBusy}
-              onClick={() => void onStop().catch(() => undefined)}
+              className="export-link"
+              disabled={!state.supported || isBusy}
+              onClick={() => void onChoose()}
               type="button"
             >
+              {copy.chooseFolder}
+            </button>
+          ) : null}
+          {needsResume ? (
+            <button
+              className="export-link"
+              disabled={!state.supported || isBusy}
+              onClick={() => void onResume()}
+              type="button"
+            >
+              {copy.resume}
+            </button>
+          ) : null}
+          {state.enabled ? (
+            <button className="ghost-button" disabled={isBusy} onClick={onStop} type="button">
               {copy.stop}
             </button>
           ) : null}
-          {status?.configured ? (
+          {state.enabled ? (
             <button
               className="ghost-button"
               disabled={isBusy}
-              onClick={() => void onRescan().catch(() => undefined)}
+              onClick={() => void onRescan()}
               type="button"
             >
               {copy.rescan}
             </button>
           ) : null}
+          {state.configured ? (
+            <button
+              className="ghost-button"
+              disabled={!state.supported || isBusy}
+              onClick={() => void onChoose()}
+              type="button"
+            >
+              {copy.changeFolder}
+            </button>
+          ) : null}
         </div>
-      </form>
+      </div>
 
-      {status?.configured ? (
+      {state.configured ? (
         <dl className="csv-tail-facts">
           <div>
             <dt>{copy.activeFile}</dt>
-            <dd>{activeFileName ?? copy.waitingFile}</dd>
+            <dd>{state.activeFileName ?? copy.waitingFile}</dd>
           </div>
           <div>
             <dt>{copy.lastRow}</dt>
-            <dd>{status.last_source_sequence ?? "-"}</dd>
+            <dd>{state.lastSourceSequence ?? "-"}</dd>
           </div>
           <div>
             <dt>{copy.lastData}</dt>
-            <dd>
-              {status.last_sampled_at
-                ? formatDate(status.last_sampled_at, locale)
-                : copy.noData}
-            </dd>
+            <dd>{state.lastSampledAt ? formatDate(state.lastSampledAt, locale) : copy.noData}</dd>
+          </div>
+          <div>
+            <dt>{copy.lastScan}</dt>
+            <dd>{state.lastScanAt ? formatDate(state.lastScanAt, locale) : "-"}</dd>
           </div>
         </dl>
       ) : null}
 
-      {status?.active_run_id ? (
+      {state.activeRunId ? (
         <button
           className="follow-live-button"
-          onClick={() => onFollowActive(status.active_run_id!)}
+          onClick={() => onFollowActive(state.activeRunId!)}
           type="button"
         >
           {copy.followLive}
         </button>
       ) : null}
 
-      {status?.last_error || error ? (
+      {state.lastError ? (
         <p className="error-text" role="alert">
-          {status?.last_error ?? error?.message}
+          {state.lastError}
         </p>
       ) : null}
     </section>
   );
-}
-
-function pointIsInsideDropZone(
-  position: { x: number; y: number },
-  element: HTMLDivElement | null,
-): boolean {
-  if (!element) {
-    return false;
-  }
-
-  const scale = window.devicePixelRatio || 1;
-  const bounds = element.getBoundingClientRect();
-
-  return physicalPointIsInsideBounds(position, scale, bounds);
 }
