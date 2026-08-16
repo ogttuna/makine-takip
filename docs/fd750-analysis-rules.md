@@ -75,7 +75,7 @@ Ardisik kayitlar arasinda 180 dakikadan fazla bosluk varsa mevcut state zinciri
 resetlenir, aktif loop `interrupted` olur ve
 `fd750_state_chain_reset` olayi yazilir.
 
-Bu kural, 240 saniyeden buyuk araligi isaretleyen `time_gap` veri-kalitesi
+Bu kural, 360 saniyeden buyuk araligi isaretleyen `time_gap` veri-kalitesi
 kuralindan bagimsizdir.
 
 ## S4-Vakum Paralel Tanilari

@@ -1,16 +1,18 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, anyhow, bail};
-use chrono::NaiveDateTime;
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 
 const TIMESTAMP_COLUMN: &str = "TARIH SAAT";
+const TIME_COLUMN: &str = "SAAT";
 const TIMESTAMP_FORMAT: &str = "%Y-%m-%d-%H:%M:%S%.f";
 const DISPLAY_TIMESTAMP_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.3f";
-const TIME_GAP_WARNING_SECONDS: f64 = 240.0;
-const PARSER_VERSION: &str = "csv-import-v2-fd750";
+const SOURCE_TIMESTAMP_FORMAT: &str = "%Y-%m-%d-%H:%M:%S%.3f";
+const TIME_GAP_WARNING_SECONDS: f64 = 360.0;
+const PARSER_VERSION: &str = "csv-import-v3-resilient-time";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ImportReport {
@@ -32,6 +34,7 @@ pub struct ParsedCsv {
     pub file_name: String,
     pub file_sha256: String,
     pub channel_codes: Vec<String>,
+    pub record_count: usize,
     pub frames: Vec<ParsedFrame>,
     pub quality_events: Vec<ParsedQualityEvent>,
     pub warning_count: usize,
@@ -111,34 +114,39 @@ pub struct ParsedQualityEvent {
     pub metadata_json: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum TimestampMode {
+    Full,
+    TimeOnly(NaiveDate),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TimestampSource {
+    index: usize,
+    mode: TimestampMode,
+}
+
 pub fn parse_csv_bytes(file_name: impl Into<String>, bytes: &[u8]) -> anyhow::Result<ParsedCsv> {
     let file_name = file_name.into();
     let file_sha256 = sha256_hex(bytes);
     let mut reader = csv::ReaderBuilder::new()
         .delimiter(b';')
         .trim(csv::Trim::All)
-        .flexible(false)
+        .flexible(true)
         .from_reader(bytes);
 
     let headers = reader
         .headers()
         .context("failed to read CSV headers")?
         .iter()
-        .map(|header| header.trim().to_string())
+        .map(|header| header.trim().trim_start_matches('\u{feff}').to_string())
         .collect::<Vec<_>>();
-    let positions = headers
-        .iter()
-        .enumerate()
-        .map(|(index, header)| (header.as_str(), index))
-        .collect::<HashMap<_, _>>();
-    let Some(timestamp_index) = positions.get(TIMESTAMP_COLUMN).copied() else {
-        bail!("CSV missing required timestamp column `{TIMESTAMP_COLUMN}`");
-    };
+    let timestamp_source = timestamp_source(&file_name, &headers)?;
     let mut canonical_codes = HashSet::<String>::new();
     let mut channel_columns = Vec::<(String, usize, String)>::new();
 
     for (index, header) in headers.iter().enumerate() {
-        if header == TIMESTAMP_COLUMN {
+        if index == timestamp_source.index {
             continue;
         }
 
@@ -164,20 +172,107 @@ pub fn parse_csv_bytes(file_name: impl Into<String>, bytes: &[u8]) -> anyhow::Re
     let mut quality_events = Vec::new();
     let mut warning_count = 0_usize;
     let mut error_count = 0_usize;
+    let mut record_count = 0_usize;
     let mut previous_sampled_at: Option<NaiveDateTime> = None;
 
-    for (record_index, record) in reader.records().enumerate() {
-        let source_row_number = (record_index + 2) as i64;
-        let record =
-            record.with_context(|| format!("failed to read CSV row {source_row_number}"))?;
+    for record in reader.records() {
+        record_count += 1;
+        let source_row_number = (record_count + 1) as i64;
+        let raw_line = raw_csv_line(bytes, source_row_number as usize);
+        let record = match record {
+            Ok(record) => record,
+            Err(error) => {
+                error_count += 1;
+                quality_events.push(csv_row_quality_event(
+                    &file_name,
+                    source_row_number,
+                    "csv_row_decode_error",
+                    "error",
+                    format!("row {source_row_number} could not be decoded: {error}"),
+                    raw_line,
+                    None,
+                    None,
+                ));
+                continue;
+            }
+        };
+
+        let extra_values = record
+            .iter()
+            .skip(headers.len())
+            .filter(|value| !value.trim().is_empty())
+            .collect::<Vec<_>>();
+
+        if !extra_values.is_empty() {
+            error_count += 1;
+            quality_events.push(csv_row_quality_event(
+                &file_name,
+                source_row_number,
+                "csv_row_shape_error",
+                "error",
+                format!(
+                    "row {source_row_number} has {} fields; expected {} and extra fields are not empty",
+                    record.len(),
+                    headers.len()
+                ),
+                raw_line,
+                None,
+                Some(serde_json::json!({
+                    "actual_field_count": record.len(),
+                    "expected_field_count": headers.len(),
+                })),
+            ));
+            continue;
+        }
+
+        if record.len() != headers.len() {
+            warning_count += 1;
+            quality_events.push(csv_row_quality_event(
+                &file_name,
+                source_row_number,
+                "csv_row_shape_warning",
+                "warning",
+                format!(
+                    "row {source_row_number} has {} fields; expected {}; known fields were retained",
+                    record.len(),
+                    headers.len()
+                ),
+                raw_line.clone(),
+                record.get(timestamp_source.index).map(str::trim),
+                Some(serde_json::json!({
+                    "actual_field_count": record.len(),
+                    "expected_field_count": headers.len(),
+                })),
+            ));
+        }
+
         let timestamp_text = record
-            .get(timestamp_index)
+            .get(timestamp_source.index)
             .map(str::trim)
-            .ok_or_else(|| anyhow!("row {source_row_number} missing timestamp"))?;
-        let sampled_at = NaiveDateTime::parse_from_str(timestamp_text, TIMESTAMP_FORMAT)
-            .with_context(|| {
-                format!("row {source_row_number} has invalid timestamp `{timestamp_text}`")
-            })?;
+            .unwrap_or_default();
+        let sampled_at = match parse_timestamp(timestamp_source.mode, timestamp_text) {
+            Ok(sampled_at) => sampled_at,
+            Err(error) => {
+                error_count += 1;
+                quality_events.push(csv_row_quality_event(
+                    &file_name,
+                    source_row_number,
+                    "csv_row_timestamp_error",
+                    "error",
+                    format!(
+                        "row {source_row_number} has invalid timestamp `{timestamp_text}`: {error}"
+                    ),
+                    raw_line,
+                    Some(timestamp_text),
+                    None,
+                ));
+                continue;
+            }
+        };
+        let source_timestamp_text = match timestamp_source.mode {
+            TimestampMode::Full => timestamp_text.to_string(),
+            TimestampMode::TimeOnly(_) => sampled_at.format(SOURCE_TIMESTAMP_FORMAT).to_string(),
+        };
 
         if let Some(previous) = previous_sampled_at {
             let gap_seconds = (sampled_at - previous).num_milliseconds() as f64 / 1_000.0;
@@ -192,6 +287,8 @@ pub fn parse_csv_bytes(file_name: impl Into<String>, bytes: &[u8]) -> anyhow::Re
                     message: format!("time gap of {gap_seconds:.3} seconds before this sample"),
                     metadata_json: Some(
                         serde_json::json!({
+                            "source_file_name": file_name,
+                            "source_row_number": source_row_number,
                             "gap_seconds": gap_seconds,
                             "previous_timestamp": previous.format(DISPLAY_TIMESTAMP_FORMAT).to_string(),
                             "current_timestamp": sampled_at.format(DISPLAY_TIMESTAMP_FORMAT).to_string()
@@ -237,6 +334,8 @@ pub fn parse_csv_bytes(file_name: impl Into<String>, bytes: &[u8]) -> anyhow::Re
                             ),
                             metadata_json: Some(
                                 serde_json::json!({
+                                    "source_file_name": file_name,
+                                    "source_row_number": source_row_number,
                                     "channel_code": channel_code,
                                     "source_header": source_header,
                                     "raw_text": raw_text,
@@ -269,14 +368,14 @@ pub fn parse_csv_bytes(file_name: impl Into<String>, bytes: &[u8]) -> anyhow::Re
         let state_observation = parsed_state_observation(&measurements);
         frames.push(ParsedFrame {
             sampled_at: sampled_at.format(DISPLAY_TIMESTAMP_FORMAT).to_string(),
-            source_timestamp_text: timestamp_text.to_string(),
+            source_timestamp_text,
             source_row_number,
             state_observation,
             measurements,
         });
     }
 
-    if frames.is_empty() {
+    if record_count == 0 {
         bail!("CSV does not contain any data rows");
     }
 
@@ -287,6 +386,7 @@ pub fn parse_csv_bytes(file_name: impl Into<String>, bytes: &[u8]) -> anyhow::Re
         file_name,
         file_sha256,
         channel_codes,
+        record_count,
         frames,
         quality_events,
         warning_count,
@@ -294,6 +394,217 @@ pub fn parse_csv_bytes(file_name: impl Into<String>, bytes: &[u8]) -> anyhow::Re
         started_at,
         finished_at,
     })
+}
+
+pub fn validate_csv_header(file_name: &str, header_line: &str) -> anyhow::Result<String> {
+    let header_line = header_line
+        .trim_start_matches('\u{feff}')
+        .trim()
+        .to_string();
+
+    if header_line.is_empty()
+        || header_line.len() > 64 * 1024
+        || header_line.contains('\n')
+        || header_line.contains('\r')
+    {
+        bail!("CSV header is invalid");
+    }
+
+    let headers = header_line
+        .split(';')
+        .map(str::trim)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let timestamp_source = timestamp_source(file_name, &headers)?;
+    let mut canonical_codes = HashSet::new();
+
+    for (index, header) in headers.iter().enumerate() {
+        if index == timestamp_source.index {
+            continue;
+        }
+
+        let canonical = canonical_channel_code(header);
+        if canonical.is_empty() {
+            bail!("CSV contains an empty measurement channel");
+        }
+        if !canonical_codes.insert(canonical.clone()) {
+            bail!("CSV contains multiple columns that map to canonical channel `{canonical}`");
+        }
+    }
+
+    if canonical_codes.is_empty() {
+        bail!("CSV does not contain any measurement channels");
+    }
+
+    Ok(header_line)
+}
+
+pub async fn record_csv_row_quality_events(
+    pool: &SqlitePool,
+    run_id: i64,
+    file_name: &str,
+    events: &[ParsedQualityEvent],
+    first_sequence: i64,
+) -> anyhow::Result<usize> {
+    let mut rejected_count = 0_usize;
+
+    for event in events
+        .iter()
+        .filter(|event| event.event_type.starts_with("csv_row_"))
+    {
+        let absolute_row_number = first_sequence + event.source_row_number - 2;
+        let original_metadata = event
+            .metadata_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok());
+        let metadata_json = serde_json::json!({
+            "source_file_name": file_name,
+            "source_file_row_number": event.source_row_number,
+            "source_row_number": absolute_row_number,
+            "details": original_metadata,
+        })
+        .to_string();
+        let message = format!(
+            "CSV `{file_name}` file row {}: {}",
+            event.source_row_number, event.message
+        );
+        let result = sqlx::query(
+            r#"
+            INSERT INTO quality_events (
+                run_id,
+                frame_id,
+                channel_id,
+                event_type,
+                severity,
+                message,
+                metadata_json
+            )
+            SELECT ?1, NULL, NULL, ?2, ?3, ?4, ?5
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM quality_events
+                WHERE run_id = ?1 AND event_type = ?2 AND metadata_json = ?5
+            )
+            "#,
+        )
+        .bind(run_id)
+        .bind(&event.event_type)
+        .bind(&event.severity)
+        .bind(message)
+        .bind(metadata_json)
+        .execute(pool)
+        .await?;
+        if event.severity == "error" {
+            rejected_count += result.rows_affected() as usize;
+        }
+    }
+
+    Ok(rejected_count)
+}
+
+fn timestamp_source(file_name: &str, headers: &[String]) -> anyhow::Result<TimestampSource> {
+    let timestamp_indices = headers
+        .iter()
+        .enumerate()
+        .filter_map(|(index, header)| (header == TIMESTAMP_COLUMN).then_some(index))
+        .collect::<Vec<_>>();
+    let time_indices = headers
+        .iter()
+        .enumerate()
+        .filter_map(|(index, header)| (header == TIME_COLUMN).then_some(index))
+        .collect::<Vec<_>>();
+
+    match (timestamp_indices.as_slice(), time_indices.as_slice()) {
+        ([index], []) => Ok(TimestampSource {
+            index: *index,
+            mode: TimestampMode::Full,
+        }),
+        ([], [index]) => {
+            let date = log_file_date(file_name).ok_or_else(|| {
+                anyhow!(
+                    "CSV with `SAAT` must use a `LogFile_YYYY_MM_DD.csv` file name so the date can be recovered"
+                )
+            })?;
+            Ok(TimestampSource {
+                index: *index,
+                mode: TimestampMode::TimeOnly(date),
+            })
+        }
+        _ => {
+            bail!("CSV must contain exactly one timestamp column: `TARIH SAAT` or `SAAT`")
+        }
+    }
+}
+
+fn parse_timestamp(mode: TimestampMode, value: &str) -> anyhow::Result<NaiveDateTime> {
+    match mode {
+        TimestampMode::Full => [
+            TIMESTAMP_FORMAT,
+            "%Y-%m-%d-%H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S%.f",
+            "%Y-%m-%dT%H:%M:%S",
+        ]
+        .iter()
+        .find_map(|format| NaiveDateTime::parse_from_str(value, format).ok())
+        .ok_or_else(|| anyhow!("expected yyyy-MM-dd-HH:mm:ss.SSS")),
+        TimestampMode::TimeOnly(date) => ["%H:%M:%S%.f", "%H:%M:%S", "%H:%M"]
+            .iter()
+            .find_map(|format| NaiveTime::parse_from_str(value, format).ok())
+            .map(|time| date.and_time(time))
+            .ok_or_else(|| anyhow!("expected HH:mm, HH:mm:ss, or HH:mm:ss.SSS")),
+    }
+}
+
+fn log_file_date(file_name: &str) -> Option<NaiveDate> {
+    let lower = file_name.to_ascii_lowercase();
+    if !lower.starts_with("logfile_") || !lower.ends_with(".csv") {
+        return None;
+    }
+
+    let date_end = file_name.len().checked_sub(4)?;
+    let date = file_name.get(8..date_end)?;
+    NaiveDate::parse_from_str(date, "%Y_%m_%d").ok()
+}
+
+fn raw_csv_line(bytes: &[u8], source_row_number: usize) -> String {
+    let Some(line) = bytes
+        .split(|byte| *byte == b'\n')
+        .nth(source_row_number.saturating_sub(1))
+    else {
+        return String::new();
+    };
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    String::from_utf8_lossy(line).into_owned()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn csv_row_quality_event(
+    file_name: &str,
+    source_row_number: i64,
+    event_type: &str,
+    severity: &str,
+    message: String,
+    raw_text: String,
+    source_timestamp_text: Option<&str>,
+    extra_metadata: Option<serde_json::Value>,
+) -> ParsedQualityEvent {
+    ParsedQualityEvent {
+        source_row_number,
+        channel_code: None,
+        event_type: event_type.to_string(),
+        severity: severity.to_string(),
+        message,
+        metadata_json: Some(
+            serde_json::json!({
+                "source_file_name": file_name,
+                "source_row_number": source_row_number,
+                "source_timestamp_text": source_timestamp_text,
+                "raw_text": raw_text,
+                "details": extra_metadata,
+            })
+            .to_string(),
+        ),
+    }
 }
 
 pub async fn import_csv_bytes(
@@ -677,7 +988,7 @@ mod tests {
                 .iter()
                 .filter(|event| event.event_type == "time_gap")
                 .count(),
-            7
+            3
         );
         assert_eq!(
             parsed
@@ -687,8 +998,86 @@ mod tests {
                 .count(),
             0
         );
-        assert_eq!(parsed.warning_count, 7);
+        assert_eq!(parsed.warning_count, 3);
         assert_eq!(parsed.error_count, 0);
+    }
+
+    #[test]
+    fn derives_the_date_from_a_daily_file_for_time_only_rows() {
+        let csv = b"SAAT;RAF1;VACUM;RECETE NO;RECETE ADIM\r\n\
+00:03;10;0.5;1;4\r\n\
+00:08;11;0.4;1;5\r\n";
+        let parsed = parse_csv_bytes("LogFile_2026_08_13.csv", csv).unwrap();
+
+        assert_eq!(parsed.record_count, 2);
+        assert_eq!(parsed.frames.len(), 2);
+        assert_eq!(
+            parsed.started_at.as_deref(),
+            Some("2026-08-13T00:03:00.000")
+        );
+        assert_eq!(
+            parsed.finished_at.as_deref(),
+            Some("2026-08-13T00:08:00.000")
+        );
+        assert_eq!(
+            parsed.frames[0].source_timestamp_text,
+            "2026-08-13-00:03:00.000"
+        );
+        assert_eq!(parsed.warning_count, 0);
+        assert_eq!(parsed.error_count, 0);
+        assert_eq!(
+            parsed.frames[1]
+                .state_observation
+                .as_ref()
+                .map(|observation| observation.source_state_code.as_str()),
+            Some("STEP_5")
+        );
+    }
+
+    #[test]
+    fn isolates_bad_rows_and_keeps_valid_measurements_flowing() {
+        let csv = b"SAAT;RAF1;VACUM\n\
+00:00;10;0.5\n\
+00:05;11\n\
+00:06;12;0.4;unexpected\n\
+not-a-time;13;0.3\n\
+00:06;14;0.2\n";
+        let parsed = parse_csv_bytes("LogFile_2026_08_14.csv", csv).unwrap();
+
+        assert_eq!(parsed.record_count, 5);
+        assert_eq!(parsed.frames.len(), 3);
+        assert_eq!(parsed.warning_count, 1);
+        assert_eq!(parsed.error_count, 3);
+        assert_eq!(parsed.frames[0].source_row_number, 2);
+        assert_eq!(parsed.frames[1].source_row_number, 3);
+        assert_eq!(parsed.frames[2].source_row_number, 6);
+        assert!(parsed.quality_events.iter().any(|event| {
+            event.event_type == "csv_row_shape_error" && event.source_row_number == 4
+        }));
+        assert!(parsed.quality_events.iter().any(|event| {
+            event.event_type == "csv_row_timestamp_error" && event.source_row_number == 5
+        }));
+        assert!(parsed.frames[1].measurements.iter().any(|measurement| {
+            measurement.channel_code == "VACUM"
+                && measurement.quality == super::MeasurementQuality::Invalid
+        }));
+    }
+
+    #[test]
+    fn requires_a_dated_file_name_when_only_time_is_available() {
+        let csv = b"SAAT;RAF1\n00:03;10\n";
+        let error = parse_csv_bytes("machine.csv", csv).unwrap_err();
+
+        assert!(error.to_string().contains("LogFile_YYYY_MM_DD.csv"));
+    }
+
+    #[test]
+    fn rejects_duplicate_timestamp_columns() {
+        let csv = b"TARIH SAAT;TARIH SAAT;RAF1\n\
+2026-08-14-00:03:00.000;2026-08-14-00:03:00.000;10\n";
+        let error = parse_csv_bytes("LogFile_2026_08_14.csv", csv).unwrap_err();
+
+        assert!(error.to_string().contains("exactly one timestamp column"));
     }
 
     #[test]

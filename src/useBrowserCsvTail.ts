@@ -14,6 +14,8 @@ import {
   saveDirectoryHandle,
   setBrowserTailEnabled,
 } from "./browserTailStorage";
+import { completeLinePrefixLength, decodeCsvRows } from "./csvByteHandling";
+import { logFileDateKey, scanStartIndex, sortCsvFiles } from "./csvFileOrdering";
 
 const SCAN_INTERVAL_MS = 30_000;
 const MAX_CHUNK_BYTES = 512 * 1024;
@@ -44,7 +46,7 @@ export type BrowserCsvTailState = {
 };
 
 type BrowserCsvTailOptions = {
-  onSynced?: (runId: number | null, insertedCount: number) => void;
+  onSynced?: (runId: number | null, insertedCount: number, rejectedCount: number) => void;
 };
 
 export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
@@ -120,6 +122,7 @@ export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
       const files = await csvFiles(directory);
       let serverStatus = await fetchBrowserTailStatus(sourceIdRef.current);
       let insertedCount = 0;
+      let rejectedCount = 0;
 
       if (files.length === 0) {
         if (retryRef.current !== null) {
@@ -163,6 +166,7 @@ export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
         );
         serverStatus = result.status;
         insertedCount += result.insertedCount;
+        rejectedCount += result.rejectedCount;
       }
 
       if (retryRef.current !== null) {
@@ -183,7 +187,11 @@ export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
         lastScanAt: new Date().toISOString(),
         lastError: null,
       }));
-      onSyncedRef.current?.(currentStatus?.active_run_id ?? null, insertedCount);
+      onSyncedRef.current?.(
+        currentStatus?.active_run_id ?? null,
+        insertedCount,
+        rejectedCount,
+      );
     } catch (error) {
       const message = errorMessage(error);
       const offline = !navigator.onLine || /fetch|network|internet|bağlantı/i.test(message);
@@ -393,26 +401,7 @@ async function csvFiles(directory: FileSystemDirectoryHandle): Promise<File[]> {
     files.push(await (entry as FileSystemFileHandle).getFile());
   }
 
-  files.sort(
-    (left, right) => left.lastModified - right.lastModified || left.name.localeCompare(right.name),
-  );
-  return files;
-}
-
-function scanStartIndex(files: File[], status: BrowserTailStatus | null): number {
-  if (!status?.active_file_name) {
-    return 0;
-  }
-
-  const activeIndex = files.findIndex((file) => file.name === status.active_file_name);
-  if (activeIndex >= 0) {
-    return activeIndex;
-  }
-
-  const firstNewer = files.findIndex(
-    (file) => file.lastModified > (status.last_modified_ms ?? 0),
-  );
-  return firstNewer >= 0 ? firstNewer : files.length;
+  return sortCsvFiles(files);
 }
 
 async function readHeader(file: File): Promise<{ line: string; endOffset: number }> {
@@ -430,8 +419,15 @@ async function readHeader(file: File): Promise<{ line: string; endOffset: number
     .decode(headerBytes)
     .replace(/^\uFEFF/, "")
     .trim();
-  if (!line.split(";").map((column) => column.trim()).includes("TARIH SAAT")) {
-    throw new Error(`${file.name}: TARIH SAAT kolonu bulunamadı.`);
+  const columns = line.split(";").map((column) => column.trim());
+  const hasFullTimestamp = columns.includes("TARIH SAAT");
+  const hasTimeOnly = columns.includes("SAAT");
+
+  if (hasFullTimestamp === hasTimeOnly) {
+    throw new Error(`${file.name}: TARIH SAAT veya SAAT kolonlarından yalnız biri bulunmalı.`);
+  }
+  if (hasTimeOnly && logFileDateKey(file.name) === null) {
+    throw new Error(`${file.name}: SAAT kolonu için dosya adı LogFile_YYYY_MM_DD.csv olmalı.`);
   }
 
   return { line, endOffset: newlineIndex + 1 };
@@ -442,10 +438,11 @@ async function syncFile(
   file: File,
   opened: BrowserTailStatus,
   acceptEof: boolean,
-): Promise<{ status: BrowserTailStatus; insertedCount: number }> {
+): Promise<{ status: BrowserTailStatus; insertedCount: number; rejectedCount: number }> {
   let status = opened;
   let offset = opened.byte_offset ?? 0;
   let insertedCount = 0;
+  let rejectedCount = 0;
 
   while (offset < file.size) {
     const end = Math.min(file.size, offset + MAX_CHUNK_BYTES);
@@ -461,15 +458,17 @@ async function syncFile(
       break;
     }
 
-    const rowsText = new TextDecoder("utf-8", { fatal: true }).decode(bytes.slice(0, consumed));
+    const rowsText = decodeCsvRows(bytes.slice(0, consumed));
     const response = await syncBrowserTailChunk({
       source_id: sourceId,
       file_name: file.name,
       offset,
+      byte_length: consumed,
       rows_text: rowsText,
     });
     status = response;
     insertedCount += response.inserted_count;
+    rejectedCount += response.rejected_count;
 
     const acknowledgedOffset = response.byte_offset ?? offset;
     if (acknowledgedOffset <= offset) {
@@ -478,16 +477,7 @@ async function syncFile(
     offset = acknowledgedOffset;
   }
 
-  return { status, insertedCount };
-}
-
-function completeLinePrefixLength(bytes: Uint8Array): number {
-  for (let index = bytes.length - 1; index >= 0; index -= 1) {
-    if (bytes[index] === 10) {
-      return index + 1;
-    }
-  }
-  return 0;
+  return { status, insertedCount, rejectedCount };
 }
 
 function errorMessage(error: unknown): string {

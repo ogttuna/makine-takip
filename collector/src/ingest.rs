@@ -7,7 +7,7 @@ use sqlx::{Row, SqlitePool};
 
 const DISPLAY_TIMESTAMP_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.3f";
 const CSV_TIMESTAMP_FORMAT: &str = "%Y-%m-%d-%H:%M:%S%.f";
-const TIME_GAP_WARNING_SECONDS: f64 = 240.0;
+const TIME_GAP_WARNING_SECONDS: f64 = 360.0;
 
 #[derive(Debug, Deserialize)]
 pub struct CreateRunRequest {

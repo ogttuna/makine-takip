@@ -9,7 +9,7 @@ import {
   getCollectorUrl,
   uploadCsv,
 } from "./api";
-import type { ImportReport } from "./api";
+import type { ImportReport, SampleFrame } from "./api";
 import { getChannelConfig } from "./channelConfig";
 import { ChartState } from "./components/StatusViews";
 import { AnalysisSummary } from "./features/analysis/AnalysisSummary";
@@ -30,6 +30,7 @@ import { RunActions } from "./features/runs/RunActions";
 import { RunList } from "./features/runs/RunList";
 import { CsvTailPanel } from "./features/source/CsvTailPanel";
 import { DEFAULT_LOCALE, getCopy, type Locale } from "./i18n";
+import { lastSourceSequence, mergeIncrementalSamples } from "./incrementalSamples";
 import {
   type ChartLayout,
   type InspectorTab,
@@ -41,6 +42,7 @@ import { useBrowserCsvTail } from "./useBrowserCsvTail";
 const THEME_STORAGE_KEY = "freezedry.theme";
 const LOCALE_STORAGE_KEY = "freezedry.locale";
 const LIVE_REFETCH_INTERVAL_MS = 30_000;
+const MAX_VISIBLE_SAMPLES = 5_000;
 
 export function App() {
   const queryClient = useQueryClient();
@@ -56,15 +58,19 @@ export function App() {
   const [followLive, setFollowLive] = useState(true);
   const operationsMenuRef = useRef<HTMLDivElement>(null);
   const browserTail = useBrowserCsvTail({
-    onSynced: (runId, insertedCount) => {
+    onSynced: (runId, insertedCount, rejectedCount) => {
       if (runId !== null) {
-        setFollowLive(true);
-        setSelectedRunId(runId);
+        if (followLive) {
+          setSelectedRunId(runId);
+        }
         void queryClient.invalidateQueries({ queryKey: ["runs"] });
       }
 
       if (runId !== null && insertedCount > 0) {
         void queryClient.invalidateQueries({ queryKey: ["run-samples", runId] });
+      }
+
+      if (runId !== null && insertedCount + rejectedCount > 0) {
         void queryClient.invalidateQueries({
           queryKey: ["run-quality-events", runId],
         });
@@ -87,7 +93,21 @@ export function App() {
   const selectedRunIsLive = selectedRun?.status === "running";
   const samplesQuery = useQuery({
     queryKey: ["run-samples", selectedRunId],
-    queryFn: () => fetchRunSamples(selectedRunId!, { latest: 5_000 }),
+    queryFn: async () => {
+      const queryKey = ["run-samples", selectedRunId] as const;
+      const current = queryClient.getQueryData<SampleFrame[]>(queryKey) ?? [];
+      const afterSequence = lastSourceSequence(current);
+
+      if (afterSequence === null) {
+        return fetchRunSamples(selectedRunId!, { latest: MAX_VISIBLE_SAMPLES });
+      }
+
+      const incoming = await fetchRunSamples(selectedRunId!, {
+        afterSequence,
+        limit: MAX_VISIBLE_SAMPLES,
+      });
+      return mergeIncrementalSamples(current, incoming, MAX_VISIBLE_SAMPLES);
+    },
     enabled: selectedRunId !== null,
     refetchInterval: selectedRunIsLive ? LIVE_REFETCH_INTERVAL_MS : false,
   });

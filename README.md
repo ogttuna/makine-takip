@@ -84,7 +84,7 @@ Gerekenler:
 
 - Node.js 24+
 - npm 11+
-- Rust 1.95+
+- Rust 1.94.1+ (repo `rust-toolchain.toml` ile 1.94.1'i otomatik secer)
 - Tauri icin platforma gore gerekli sistem paketleri
 
 Bagimliliklari kur:
@@ -136,7 +136,7 @@ isletim sisteminin uygulama veri klasorunde tutulur.
 - `npm run collector:check`: Collector crate derleme kontrolu
 - `npm run local:serve`: Frontend build + collector static serve
 - `npm run tauri:dev`: Tauri 2 masaustu uygulamasi
-- `npm run check`: Klasör bırakma testleri, frontend üretim derlemesi ve collector check
+- `npm run check`: Frontend birim testleri, üretim derlemesi ve collector check
 
 ## Ortam Degiskenleri
 
@@ -152,44 +152,67 @@ isletim sisteminin uygulama veri klasorunde tutulur.
 
 ### Canli CSV klasoru
 
-Fabrika PC'sinde collector'i calistirin, web arayuzunde **Islemler > Kaynak**
-sekmesini acin ve makinenin CSV yazdigi klasorun tam path'ini girin. Bu path
-tarayicinin calistigi cihaza degil, collector'in calistigi fabrika PC'sine
-aittir. Tauri masaustu uygulamasinda ayni ekrandaki alana klasor
-suruklenip birakilabilir; mutlak path otomatik alinir, kaydedilir ve izleme
-ek bir onay gerekmeden baslar. Normal web tarayicisi guvenlik nedeniyle yerel
-klasorun mutlak path'ini paylasmadigi icin web kullaniminda path alani korunur.
-Tauri kullaniliyorsa gomulu collector uygulama acilisinda kendisi baslar.
+Uzak erisim icin onerilen akis soyledir:
 
-**Kaydet ve baslat** veya masaustu klasor drop'u sonrasinda collector:
+1. Uygulama ve collector, fabrika PC'sinin de uzak izleyicilerin de
+   erisebildigi ayni HTTPS adresinde calisir.
+2. Fabrika PC'sinde Chrome veya Edge ile bu adres acilir.
+3. **Islemler > Kaynak > CSV klasorunu sec** ile makinenin log klasoru secilir.
+   Bu klasor yerel disk, map edilmis ag surucusu veya tarayicinin dosya
+   secicisinde gorulebilen bir network share olabilir.
+4. Fabrika sekmesi acik kaldigi surece yalnizca yeni tamamlanmis CSV satirlari
+   sunucuya gonderilir. Uzak bilgisayarlar ayni adrese girip kayitli ve canli
+   veriyi gorur; onlarin klasor secmesi gerekmez.
+
+Tarayici klasor izni nedeniyle bu akis Chrome/Edge ve HTTPS ister. `localhost`
+gelistirme icin istisnadir. Fabrika sekmesi kapanirsa mevcut veri kaybolmaz;
+sekme yeniden acilip klasor izni verildiginde sunucudaki checkpoint'ten devam
+eder. Internet'e acik kurulumda uygulamayi VPN veya kimlik dogrulamali reverse
+proxy arkasinda yayinlayin.
+
+Klasor secildikten sonra sistem:
 
 - klasordeki eski `*.csv` dosyalarini ayni run'a ekler; tum dosyalar
   `LogFile_YYYY_MM_DD.csv` formatindaysa kopyalanma zamanindan bagimsiz olarak
   adlarindaki tarihe gore siralar,
 - en yeni dosyayi artimli okumaya baslar,
 - yalnizca satir sonu tamamlanmis yeni kayitlari isler,
-- byte checkpoint'i SQLite'ta saklayip restart sonrasinda kaldigi yerden devam
-  eder,
+- byte ve source-sequence checkpoint'ini sunucudaki SQLite'ta saklar,
 - yeni gunluk CSV gecerli bir header ile olustugunda ayni run'i koruyarak yeni
   dosyaya otomatik gecer,
-- arada header'i henuz tamamlanmamis bir gunluk dosya varsa daha yeni dosyaya
-  atlamaz; dosyanin hazir olmasini bekler,
-- bozuk bir tarihsel CSV'yi sessizce atlamaz; hatayi gosterir ve dosya
-  duzeltildiginde ayni run uzerinden yeniden dener,
-- aktif run seciliyken grafigi 30 saniyede bir gunceller.
+- ayni satir tekrar taransa bile source sequence ile ikinci kez yazmaz,
+- yeni sample sorgularinda son sequence'ten sonrasini alir; yeni satir yoksa
+  grafige eski noktayi yeniden eklemez,
+- 30 saniyelik tarama/polling araligini yalnizca goruntuleme gecikmesi olarak
+  kullanir; CSV zamanini veya satir kimligini degistirmez.
 
-Path'in collector tarafindan okunabilir ve bir klasor olmasi gerekir. Varsayilan
-dosya filtresi `*.csv`, tarama araligi 30 saniyedir. Izleme durumu, aktif dosya,
-son satir, son veri zamani ve hata mesaji ayni panelde gorulur. Ayar SQLite'ta
-saklandigi icin izleme acikken collector yeniden baslatilirsa otomatik devam
-eder.
+Desteklenen iki zaman formati vardir:
 
-Grafik zamani polling anindan degil CSV'deki `TARIH SAAT` kolonundan gelir.
-Desteklenen kaynak bicimi `2026-07-14-10:06:00.000` seklindedir. Ornegin
-10:00 kaydindan sonra 10:03 satiri gelmeyip sonraki kayit 10:06 olarak gelirse
-sistem 10:06 kaydini kendi saatine yazar; araya veri uydurmaz veya zamani
-kaydirmaz. 240 saniyeden buyuk aralik `time_gap` uyarisi olur ve grafik cizgisi
-bu boslukta kesilir.
+- `TARIH SAAT`: `2026-07-14-10:06:00.000` gibi tam tarih-saat.
+- `SAAT`: `00:03`, `00:03:15` veya `00:03:15.250`. Bu bicimde tarih
+  `LogFile_2026_08_13.csv` dosya adindan alinir.
+
+CSV hatalari satir/hücre seviyesinde izole edilir:
+
+- gecersiz sayisal hucre ham metniyle ve `invalid` kalitesiyle saklanir; satirin
+  diger olcumleri kaybolmaz,
+- eksik hucreli satirin bilinen kolonlari saklanir ve eksikler kalite olayi
+  olur,
+- gecersiz timestamp veya dolu fazladan kolon iceren satir karantinaya alinir;
+  kalite olayina dosya/satir bilgisi ve ham metin yazilir, sonraki satira devam
+  edilir,
+- satir verisindeki bozuk UTF-8 byte'i aktarimi kilitlemez; sorunlu deger
+  gecersiz olarak isaretlenirken checkpoint kaynak dosyanin gercek byte
+  konumuyla ilerler,
+- yarim yazilmis son satir tamamlanana kadar bekletilir,
+- header okunamiyorsa sema guvenle belirlenemeyecegi icin o dosya hata olarak
+  gosterilir.
+
+Grafik zamani polling anindan degil CSV zamanindan gelir. Ornegin 10:00
+kaydindan sonra sonraki kayit 10:07 ise sistem noktayi tam 10:07'ye yazar;
+araya veri uydurmaz, onceki satiri tekrar etmez ve zamani kaydirmaz. 360
+saniyeden buyuk aralik `time_gap` uyarisi olur ve grafik cizgisi bu boslukta
+kesilir.
 
 Ilgili endpointler:
 
@@ -262,7 +285,7 @@ Temel yorum:
 - Raflarin kapanmasi veya `VACUM > 4` STOP gecisini baslatir.
 - STOP/WAIT sonrasinda en sicak gecerli `S1..S4 >= 0 C` ise DEFROST baslar.
 - DEFROST sirasinda `E.GUC < 5` ise DEFROST_STOP olur.
-- 180 dakikadan uzun veri boslugu proses zincirini resetler; 240 saniyelik
+- 180 dakikadan uzun veri boslugu proses zincirini resetler; 360 saniyelik
   `time_gap` veri-kalitesi uyarisi bundan ayri tutulur.
 - S4-S2 ile vakumun 30 dakikalik paralel degisimi tani olayi olarak kaydedilir.
 

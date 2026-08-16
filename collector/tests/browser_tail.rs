@@ -21,12 +21,14 @@ async fn resumes_from_server_checkpoint_and_makes_retries_idempotent() {
         source_id: SOURCE_ID.to_string(),
         file_name: "LogFile_2026_07_21.csv".to_string(),
         offset: HEADER.len() as i64,
+        byte_length: rows.len() as i64,
         rows_text: rows.to_string(),
     };
     let first = sync_chunk(&pool, request).await.unwrap();
 
     assert_eq!(first.inserted_count, 2);
     assert_eq!(first.skipped_count, 0);
+    assert_eq!(first.rejected_count, 0);
     assert!(!first.replayed);
     assert_eq!(first.status.last_source_sequence, Some(3));
     assert_eq!(
@@ -40,6 +42,7 @@ async fn resumes_from_server_checkpoint_and_makes_retries_idempotent() {
             source_id: SOURCE_ID.to_string(),
             file_name: "LogFile_2026_07_21.csv".to_string(),
             offset: HEADER.len() as i64,
+            byte_length: rows.len() as i64,
             rows_text: rows.to_string(),
         },
     )
@@ -55,7 +58,7 @@ async fn resumes_from_server_checkpoint_and_makes_retries_idempotent() {
 }
 
 #[tokio::test]
-async fn rotates_to_a_new_file_and_completes_the_previous_run() {
+async fn rotates_daily_files_inside_the_same_running_stream() {
     let root = tempfile::tempdir().unwrap();
     let pool = create_test_pool(root.path()).await;
     let old = open(&pool, "LogFile_2026_07_20.csv", 0).await;
@@ -64,8 +67,8 @@ async fn rotates_to_a_new_file_and_completes_the_previous_run() {
     let new = open(&pool, "LogFile_2026_07_21.csv", 0).await;
     let new_run_id = new.active_run_id.unwrap();
 
-    assert_ne!(new_run_id, old_run_id);
-    assert_eq!(run_status(&pool, old_run_id).await, "completed");
+    assert_eq!(new_run_id, old_run_id);
+    assert_eq!(run_status(&pool, old_run_id).await, "running");
     assert_eq!(run_status(&pool, new_run_id).await, "running");
 
     let status = source_status(&pool, SOURCE_ID).await.unwrap();
@@ -76,9 +79,93 @@ async fn rotates_to_a_new_file_and_completes_the_previous_run() {
     assert_eq!(status.active_run_id, Some(new_run_id));
 }
 
+#[tokio::test]
+async fn accepts_time_only_rows_preserves_recipe_steps_and_quarantines_bad_rows() {
+    let root = tempfile::tempdir().unwrap();
+    let pool = create_test_pool(root.path()).await;
+    let header_line = "SAAT;RAF1;VACUM;RECETE NO;RECETE ADIM";
+    let header = format!("{header_line}\r\n");
+    let rows = "00:03;10;0.5;1;4\r\n\
+                not-a-time;11;0.4;1;4\r\n\
+                00:08;12;0.3;1;5\r\n";
+    let opened = open_with_header(
+        &pool,
+        "LogFile_2026_08_13.csv",
+        header_line,
+        header.len(),
+        rows.len(),
+    )
+    .await;
+    let response = sync_chunk(
+        &pool,
+        BrowserTailChunkRequest {
+            source_id: SOURCE_ID.to_string(),
+            file_name: "LogFile_2026_08_13.csv".to_string(),
+            offset: header.len() as i64,
+            byte_length: rows.len() as i64,
+            rows_text: rows.to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let run_id = opened.active_run_id.unwrap();
+
+    assert_eq!(response.inserted_count, 2);
+    assert_eq!(response.rejected_count, 1);
+    assert_eq!(response.status.last_source_sequence, Some(4));
+    assert_eq!(frame_sequences(&pool, run_id).await, vec![2, 4]);
+    assert_eq!(state_observation_count(&pool, run_id).await, 2);
+    assert_eq!(rejected_row_count(&pool, run_id).await, 1);
+}
+
+#[tokio::test]
+async fn advances_by_original_bytes_when_invalid_utf8_was_replaced_in_the_browser() {
+    let root = tempfile::tempdir().unwrap();
+    let pool = create_test_pool(root.path()).await;
+    let header_line = "SAAT;RAF1";
+    let header = format!("{header_line}\n");
+    let rows = "00:03;�\n00:08;12\n";
+    let original_byte_length = rows.len() - 2;
+    let opened = open_with_header(
+        &pool,
+        "LogFile_2026_08_15.csv",
+        header_line,
+        header.len(),
+        original_byte_length,
+    )
+    .await;
+
+    let response = sync_chunk(
+        &pool,
+        BrowserTailChunkRequest {
+            source_id: SOURCE_ID.to_string(),
+            file_name: "LogFile_2026_08_15.csv".to_string(),
+            offset: header.len() as i64,
+            byte_length: original_byte_length as i64,
+            rows_text: rows.to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.inserted_count, 2);
+    assert_eq!(response.status.byte_offset, response.status.file_size);
+    assert_eq!(response.status.byte_offset, opened.file_size);
+}
+
 async fn open(
     pool: &sqlx::SqlitePool,
     file_name: &str,
+    rows_length: usize,
+) -> collector::browser_tail::BrowserTailStatus {
+    open_with_header(pool, file_name, HEADER_LINE, HEADER.len(), rows_length).await
+}
+
+async fn open_with_header(
+    pool: &sqlx::SqlitePool,
+    file_name: &str,
+    header_line: &str,
+    header_length: usize,
     rows_length: usize,
 ) -> collector::browser_tail::BrowserTailStatus {
     open_file(
@@ -87,12 +174,40 @@ async fn open(
             source_id: SOURCE_ID.to_string(),
             source_name: "MachineLogs".to_string(),
             file_name: file_name.to_string(),
-            header_line: HEADER_LINE.to_string(),
-            header_end_offset: HEADER.len() as i64,
-            file_size: (HEADER.len() + rows_length) as i64,
+            header_line: header_line.to_string(),
+            header_end_offset: header_length as i64,
+            file_size: (header_length + rows_length) as i64,
             last_modified_ms: 1_753_094_400_000,
         },
     )
+    .await
+    .unwrap()
+}
+
+async fn frame_sequences(pool: &sqlx::SqlitePool, run_id: i64) -> Vec<i64> {
+    sqlx::query_scalar(
+        "SELECT source_row_number FROM sample_frames WHERE run_id = ?1 ORDER BY source_row_number",
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn state_observation_count(pool: &sqlx::SqlitePool, run_id: i64) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM run_state_observations WHERE run_id = ?1")
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn rejected_row_count(pool: &sqlx::SqlitePool, run_id: i64) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM quality_events WHERE run_id = ?1 AND event_type LIKE 'csv_row_%'",
+    )
+    .bind(run_id)
+    .fetch_one(pool)
     .await
     .unwrap()
 }

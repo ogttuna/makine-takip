@@ -207,6 +207,7 @@ export const browserTailStatusSchema = z.object({
 export const browserTailChunkResponseSchema = browserTailStatusSchema.extend({
   inserted_count: z.number(),
   skipped_count: z.number(),
+  rejected_count: z.number(),
   replayed: z.boolean(),
 });
 
@@ -248,6 +249,7 @@ export type BrowserTailChunkPayload = {
   source_id: string;
   file_name: string;
   offset: number;
+  byte_length: number;
   rows_text: string;
 };
 

@@ -11,7 +11,9 @@ use sqlx::{FromRow, SqlitePool};
 use tokio::sync::{Mutex, Notify, RwLock, watch};
 use tokio::task::JoinHandle;
 
-use crate::csv_import::{ParsedCsv, parse_csv_bytes};
+use crate::csv_import::{
+    ParsedCsv, parse_csv_bytes, record_csv_row_quality_events, validate_csv_header,
+};
 use crate::ingest::{
     AppendMeasurementRequest, AppendSampleRequest, AppendSamplesRequest, CreateRunRequest,
     append_samples, create_run,
@@ -488,16 +490,11 @@ impl CsvTailManager {
         let bytes = fs::read(file_path)
             .with_context(|| format!("failed to read historical CSV `{file_path}`"))?;
         let file_name = file_name(file_path)?;
-        let parsed = parse_csv_bytes(file_name, &bytes)?;
+        let parsed = parse_csv_bytes(file_name.clone(), &bytes)?;
         let sample_count = parsed.frames.len() as i64;
-        let first_sequence = sqlx::query_scalar::<_, Option<i64>>(
-            "SELECT MAX(source_row_number) FROM sample_frames WHERE run_id = ?1",
-        )
-        .bind(run_id)
-        .fetch_one(&self.inner.pool)
-        .await?
-        .unwrap_or(1)
-            + 1;
+        let record_count = parsed.record_count as i64;
+        let first_sequence = last_source_sequence(&self.inner.pool, source_id, run_id).await? + 1;
+        let row_quality_events = parsed.quality_events.clone();
 
         if sample_count > 0 {
             append_samples(
@@ -507,6 +504,14 @@ impl CsvTailManager {
             )
             .await?;
         }
+        record_csv_row_quality_events(
+            &self.inner.pool,
+            run_id,
+            &file_name,
+            &row_quality_events,
+            first_sequence,
+        )
+        .await?;
         let header_line = read_header(Path::new(file_path))?.map(|item| item.0);
 
         sqlx::query(
@@ -529,7 +534,7 @@ impl CsvTailManager {
         .bind(file_path)
         .bind(run_id)
         .bind(bytes.len() as i64)
-        .bind(first_sequence + sample_count - 1)
+        .bind(first_sequence + record_count - 1)
         .bind(header_line)
         .bind(now())
         .execute(&self.inner.pool)
@@ -565,13 +570,8 @@ impl CsvTailManager {
                 .await?
             }
         };
-        let last_source_sequence = sqlx::query_scalar::<_, Option<i64>>(
-            "SELECT MAX(source_row_number) FROM sample_frames WHERE run_id = ?1",
-        )
-        .bind(run_id)
-        .fetch_one(&self.inner.pool)
-        .await?
-        .unwrap_or(1);
+        let last_source_sequence =
+            last_source_sequence(&self.inner.pool, source_id, run_id).await?;
 
         sqlx::query(
             r#"
@@ -701,16 +701,30 @@ impl CsvTailManager {
         csv_bytes.extend_from_slice(header_line.as_bytes());
         csv_bytes.push(b'\n');
         csv_bytes.extend_from_slice(complete_bytes);
-        let parsed = parse_csv_bytes(file_name(file_path)?, &csv_bytes)?;
+        let source_file_name = file_name(file_path)?;
+        let parsed = parse_csv_bytes(source_file_name.clone(), &csv_bytes)?;
         let sample_count = parsed.frames.len() as i64;
-        let request = parsed_to_append_request(parsed, checkpoint.last_source_sequence + 1);
+        let record_count = parsed.record_count as i64;
+        let first_sequence = checkpoint.last_source_sequence + 1;
+        let row_quality_events = parsed.quality_events.clone();
 
-        append_samples(&self.inner.pool, run_id, request).await?;
+        if sample_count > 0 {
+            let request = parsed_to_append_request(parsed, first_sequence);
+            append_samples(&self.inner.pool, run_id, request).await?;
+        }
+        record_csv_row_quality_events(
+            &self.inner.pool,
+            run_id,
+            &source_file_name,
+            &row_quality_events,
+            first_sequence,
+        )
+        .await?;
         update_checkpoint(
             &self.inner.pool,
             checkpoint.id,
             checkpoint.byte_offset + consumed as i64,
-            checkpoint.last_source_sequence + sample_count,
+            checkpoint.last_source_sequence + record_count,
             metadata.len(),
         )
         .await?;
@@ -749,11 +763,10 @@ fn parsed_to_append_request(parsed: ParsedCsv, first_sequence: i64) -> AppendSam
     let samples = parsed
         .frames
         .into_iter()
-        .enumerate()
-        .map(|(index, frame)| AppendSampleRequest {
+        .map(|frame| AppendSampleRequest {
             sampled_at: frame.sampled_at,
             source_timestamp_text: Some(frame.source_timestamp_text),
-            source_sequence: Some(first_sequence + index as i64),
+            source_sequence: Some(first_sequence + frame.source_row_number - 2),
             state_observation: frame.state_observation.map(|observation| {
                 crate::ingest::AppendStateObservationRequest {
                     source_recipe_code: observation.source_recipe_code,
@@ -824,6 +837,34 @@ async fn load_checkpoint(
     .bind(file_path)
     .fetch_optional(pool)
     .await?)
+}
+
+async fn last_source_sequence(
+    pool: &SqlitePool,
+    source_id: i64,
+    run_id: i64,
+) -> anyhow::Result<i64> {
+    let checkpoint_sequence = sqlx::query_scalar::<_, Option<i64>>(
+        r#"
+        SELECT MAX(last_source_sequence)
+        FROM csv_tail_checkpoints
+        WHERE source_id = ?1 AND run_id = ?2
+        "#,
+    )
+    .bind(source_id)
+    .bind(run_id)
+    .fetch_one(pool)
+    .await?
+    .unwrap_or(1);
+    let sample_sequence = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT MAX(source_row_number) FROM sample_frames WHERE run_id = ?1",
+    )
+    .bind(run_id)
+    .fetch_one(pool)
+    .await?
+    .unwrap_or(1);
+
+    Ok(checkpoint_sequence.max(sample_sequence))
 }
 
 async fn update_checkpoint(
@@ -1013,14 +1054,9 @@ fn read_header(path: &Path) -> anyhow::Result<Option<(String, usize)>> {
         .context("CSV header must be UTF-8")?
         .trim()
         .to_string();
-    let columns = header.split(';').map(str::trim).collect::<Vec<_>>();
-
-    if !columns.contains(&"TARIH SAAT") || columns.len() < 2 {
-        bail!(
-            "CSV `{}` must contain `TARIH SAAT` and at least one measurement channel",
-            path.display()
-        );
-    }
+    let source_file_name = file_name(&path.to_string_lossy())?;
+    let header = validate_csv_header(&source_file_name, &header)
+        .with_context(|| format!("CSV `{}` has an invalid header", path.display()))?;
 
     Ok(Some((header, newline_index + 1)))
 }

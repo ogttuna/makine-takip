@@ -316,7 +316,9 @@ async fn import_csv(
             .map(ToString::to_string)
             .unwrap_or_else(|| "upload.csv".to_string());
         let bytes = field.bytes().await.map_err(ApiError::bad_request)?;
-        let report = import_csv_bytes(&state.pool, file_name, &bytes).await?;
+        let report = import_csv_bytes(&state.pool, file_name, &bytes)
+            .await
+            .map_err(ApiError::bad_request)?;
 
         return Ok(Json(report));
     }
@@ -537,8 +539,9 @@ async fn run_samples(
             ORDER BY
                 CASE WHEN ?5 = 1 THEN sampled_at END DESC,
                 CASE WHEN ?5 = 1 THEN source_row_number END DESC,
-                CASE WHEN ?5 = 0 THEN sampled_at END ASC,
-                CASE WHEN ?5 = 0 THEN source_row_number END ASC
+                CASE WHEN ?5 = 0 AND ?4 IS NOT NULL THEN source_row_number END ASC,
+                CASE WHEN ?5 = 0 AND ?4 IS NULL THEN sampled_at END ASC,
+                CASE WHEN ?5 = 0 AND ?4 IS NULL THEN source_row_number END ASC
             LIMIT ?6
         )
         SELECT
@@ -679,8 +682,15 @@ async fn run_quality_events(
             q.id,
             q.frame_id,
             f.sampled_at,
-            f.source_timestamp_text,
-            f.source_row_number,
+            COALESCE(
+                f.source_timestamp_text,
+                json_extract(q.metadata_json, '$.source_timestamp_text'),
+                json_extract(q.metadata_json, '$.details.source_timestamp_text')
+            ) AS source_timestamp_text,
+            COALESCE(
+                f.source_row_number,
+                CAST(json_extract(q.metadata_json, '$.source_row_number') AS INTEGER)
+            ) AS source_row_number,
             c.code AS channel_code,
             q.event_type,
             q.severity,
@@ -690,7 +700,12 @@ async fn run_quality_events(
         LEFT JOIN sample_frames f ON f.id = q.frame_id
         LEFT JOIN channels c ON c.id = q.channel_id
         WHERE q.run_id = ?1
-        ORDER BY f.sampled_at ASC, q.id ASC
+        ORDER BY
+            COALESCE(
+                f.source_row_number,
+                CAST(json_extract(q.metadata_json, '$.source_row_number') AS INTEGER)
+            ) ASC,
+            q.id ASC
         "#,
     )
     .bind(id)

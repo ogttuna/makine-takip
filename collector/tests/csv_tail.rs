@@ -40,6 +40,52 @@ async fn tails_only_complete_new_rows_and_resumes_from_checkpoint() {
 }
 
 #[tokio::test]
+async fn tails_time_only_daily_rows_and_continues_after_a_bad_record() {
+    let root = tempfile::tempdir().unwrap();
+    let source_dir = root.path().join("source");
+    fs::create_dir(&source_dir).unwrap();
+    let active_file = source_dir.join("LogFile_2026_08_13.csv");
+    fs::write(
+        &active_file,
+        "SAAT;RAF1;VACUM;RECETE NO;RECETE ADIM\r\n\
+00:03;10;0.5;1;4\r\n\
+not-a-time;11;0.4;1;4\r\n\
+00:08;12;0.3;1;5\r\n",
+    )
+    .unwrap();
+
+    let pool = create_test_pool(root.path()).await;
+    let manager = configure_manager(&pool, &source_dir).await;
+    let status = manager.scan_once().await.unwrap();
+    let run_id = status.active_run_id.unwrap();
+    let sequences = sqlx::query_scalar::<_, i64>(
+        "SELECT source_row_number FROM sample_frames WHERE run_id = ?1 ORDER BY source_row_number",
+    )
+    .bind(run_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let rejected_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM quality_events WHERE run_id = ?1 AND event_type = 'csv_row_timestamp_error'",
+    )
+    .bind(run_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let observation_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM run_state_observations WHERE run_id = ?1")
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    assert_eq!(sequences, vec![2, 4]);
+    assert_eq!(rejected_count, 1);
+    assert_eq!(observation_count, 2);
+    assert_eq!(status.last_source_sequence, Some(4));
+}
+
+#[tokio::test]
 async fn waits_for_valid_daily_file_then_continues_the_same_stream_run() {
     let root = tempfile::tempdir().unwrap();
     let source_dir = root.path().join("source");
@@ -367,7 +413,7 @@ async fn does_not_skip_a_headerless_middle_file_when_a_newer_file_is_ready() {
 }
 
 #[tokio::test]
-async fn preserves_csv_timestamps_and_reports_a_six_minute_gap() {
+async fn preserves_csv_timestamps_and_reports_a_gap_over_six_minutes() {
     let root = tempfile::tempdir().unwrap();
     let source_dir = root.path().join("source");
     fs::create_dir(&source_dir).unwrap();
@@ -375,7 +421,7 @@ async fn preserves_csv_timestamps_and_reports_a_six_minute_gap() {
         source_dir.join("LogFile_2026_07_14.csv"),
         format!(
             "{HEADER}2026-07-14-10:00:00.000;10.0;0.4\n\
-             2026-07-14-10:06:00.000;12.0;0.2\n"
+             2026-07-14-10:07:00.000;12.0;0.2\n"
         ),
     )
     .unwrap();
@@ -404,7 +450,7 @@ async fn preserves_csv_timestamps_and_reports_a_six_minute_gap() {
         sampled_at,
         [
             "2026-07-14T10:00:00.000".to_string(),
-            "2026-07-14T10:06:00.000".to_string(),
+            "2026-07-14T10:07:00.000".to_string(),
         ]
     );
     assert_eq!(gap_count, 1);
@@ -457,7 +503,7 @@ async fn imports_older_files_once_and_tails_the_newest_file() {
 }
 
 #[tokio::test]
-async fn retries_a_failed_historical_file_without_skipping_or_creating_another_run() {
+async fn quarantines_a_bad_historical_row_and_continues_with_newer_files() {
     let root = tempfile::tempdir().unwrap();
     let source_dir = root.path().join("source");
     fs::create_dir(&source_dir).unwrap();
@@ -475,30 +521,32 @@ async fn retries_a_failed_historical_file_without_skipping_or_creating_another_r
 
     let pool = create_test_pool(root.path()).await;
     let manager = configure_manager(&pool, &source_dir).await;
-    let error = manager.scan_once().await.unwrap_err();
-    let failed_status = manager.status().await.unwrap();
-    let run_id = failed_status.active_run_id.unwrap();
-
-    assert!(error.to_string().contains("historical CSV backfill failed"));
-    assert!(failed_status.active_file_path.is_none());
-    assert!(failed_status.last_error.is_some());
-    assert_eq!(frame_count(&pool, run_id).await, 0);
-
-    fs::write(
-        &historical_file,
-        format!("{HEADER}2026-07-13-12:00:00.000;9.0;0.5\n"),
-    )
-    .unwrap();
-    let recovered_status = manager.scan_once().await.unwrap();
+    let status = manager.scan_once().await.unwrap();
+    let run_id = status.active_run_id.unwrap();
     let run_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs")
         .fetch_one(&pool)
         .await
         .unwrap();
+    let rejected_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM quality_events WHERE run_id = ?1 AND event_type = 'csv_row_timestamp_error'",
+    )
+    .bind(run_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let rejected_metadata: String = sqlx::query_scalar(
+        "SELECT metadata_json FROM quality_events WHERE run_id = ?1 AND event_type = 'csv_row_timestamp_error'",
+    )
+    .bind(run_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
-    assert_eq!(recovered_status.active_run_id, Some(run_id));
-    assert!(recovered_status.last_error.is_none());
+    assert!(status.last_error.is_none());
     assert_eq!(run_count, 1);
-    assert_eq!(frame_count(&pool, run_id).await, 2);
+    assert_eq!(frame_count(&pool, run_id).await, 1);
+    assert_eq!(rejected_count, 1);
+    assert!(rejected_metadata.contains("not-a-timestamp"));
 }
 
 async fn configure_manager(

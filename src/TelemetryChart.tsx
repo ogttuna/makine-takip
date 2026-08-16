@@ -369,7 +369,7 @@ function buildSeries(
       const measurement = sample.measurements.find(
         (item) => item.channel_code === channel,
       );
-      const isGap = previousTimestamp !== null && timestampMs - previousTimestamp > 240_000;
+      const isGap = previousTimestamp !== null && timestampMs - previousTimestamp > 360_000;
 
       if (isGap && previousTimestamp !== null) {
         lineData.push({ value: [new Date(previousTimestamp + 1).toISOString(), null] });
@@ -602,7 +602,7 @@ function shelfAverageLineData(
   for (const sample of samples) {
     const timestamp = sample.sampled_at;
     const timestampMs = Date.parse(timestamp);
-    const isGap = previousTimestamp !== null && timestampMs - previousTimestamp > 240_000;
+    const isGap = previousTimestamp !== null && timestampMs - previousTimestamp > 360_000;
 
     if (isGap && previousTimestamp !== null) {
       lineData.push({ value: [new Date(previousTimestamp + 1).toISOString(), null] });

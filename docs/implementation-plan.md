@@ -73,7 +73,7 @@ Dosya: `LogFile_2026_01_26.csv`
 - Yaklasik sure: 7 saat 43 dakika.
 - Medyan ornekleme araligi: 180 saniye.
 - En uzun zaman boslugu: 967 saniye.
-- 240 saniyeden buyuk 7 bosluk var.
+- 360 saniyeden buyuk 3 bosluk var.
 - `RAF3` kanalinda 4 adet `850.0` raf-kapali kodu var.
 - `VACUM` kanali hem `1.6E-05` seviyesinde hem de yaklasik `287`
   seviyesinde degerler iceriyor.
@@ -636,8 +636,8 @@ Makine bir CSV dosyasina surekli satir ekliyorsa:
 - Yarim yazilmis satir bekletilir.
 - Yeni gunluk dosya olusursa ayni run korunarak yeni dosyaya otomatik gecilir.
 - Okunan satirlar dogrudan tabloya yazilmaz; ortak ingest modeline cevrilir.
-- Grafik X ekseni polling saatini degil CSV'deki `TARIH SAAT` degerini kullanir.
-- Atlanan olcum sonraki noktayi kaydirmaz; 240 saniyeyi asan aralik `time_gap`
+- Grafik X ekseni polling saatini degil CSV'deki kaynak zamanini kullanir.
+- Atlanan olcum sonraki noktayi kaydirmaz; 360 saniyeyi asan aralik `time_gap`
   olarak raporlanir ve grafik cizgisi boslukta kesilir.
 
 ### Asama D: HTTP push / webhook
@@ -753,14 +753,15 @@ Yapilacaklar:
 
 - `;` delimiter kullan.
 - Beklenen header listesini kontrol et.
-- `TARIH SAAT` alanini `%Y-%m-%d-%H:%M:%S%.3f` formatinda parse et.
+- `TARIH SAAT` alanini tam tarih-saat olarak; `SAAT` alanini
+  `LogFile_YYYY_MM_DD.csv` adindaki tarihle birlikte parse et.
 - Saat dilimi bilgisi olmadigi icin ilk asamada kaynak timestamp metnini de
   sakla.
 - `1.607629E-05` gibi bilimsel gosterimli sayilari parse et.
 - Satir numarasini sakla.
 - Dosya SHA-256 hesapla.
 - Medyan ornekleme araligini hesapla.
-- 240 saniyeden buyuk bosluklari raporla.
+- 360 saniyeden buyuk bosluklari raporla.
 - `RAF1..RAF4=850 +/- 0.5` degerlerini raf-kapali kodu olarak koru.
 
 Kabul:
@@ -770,7 +771,7 @@ Kabul:
   - 10 kanal
   - baslangic `2026-01-26-11:08:17.626`
   - bitis `2026-01-26-18:51:16.967`
-  - 7 adet 240 saniye ustu time gap
+  - 3 adet 360 saniye ustu time gap
   - 4 adet `RAF3=850.0` raf-kapali kodu, 0 suspect
 
 ### 3. Import API'sini Yaz

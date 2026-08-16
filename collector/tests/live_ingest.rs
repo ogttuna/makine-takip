@@ -88,7 +88,7 @@ async fn appends_auto_sequences_and_quality_events() {
                     vec![number_measurement("RAF1", 10.25)],
                 ),
                 sample_without_sequence(
-                    "2026-06-24T10:05:01.000",
+                    "2026-06-24T10:07:01.000",
                     vec![
                         number_measurement("RAF3", 850.0),
                         text_measurement("TEXT_STATUS", "NaN"),
@@ -107,7 +107,7 @@ async fn appends_auto_sequences_and_quality_events() {
     assert_eq!(report.error_count, 1);
     assert_eq!(
         report.latest_sampled_at.as_deref(),
-        Some("2026-06-24T10:05:01.000")
+        Some("2026-06-24T10:07:01.000")
     );
 
     let sequences: Vec<i64> = sqlx::query_scalar(

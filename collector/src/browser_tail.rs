@@ -3,10 +3,12 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
 
-use crate::csv_import::{ParsedCsv, parse_csv_bytes};
+use crate::csv_import::{
+    ParsedCsv, parse_csv_bytes, record_csv_row_quality_events, validate_csv_header,
+};
 use crate::ingest::{
-    AppendMeasurementRequest, AppendSampleRequest, AppendSamplesRequest, CreateRunRequest,
-    append_samples, create_run,
+    AppendMeasurementRequest, AppendSampleRequest, AppendSamplesRequest,
+    AppendStateObservationRequest, CreateRunRequest, append_samples, create_run,
 };
 
 const MAX_CHUNK_BYTES: usize = 1_000_000;
@@ -27,6 +29,7 @@ pub struct BrowserTailChunkRequest {
     pub source_id: String,
     pub file_name: String,
     pub offset: i64,
+    pub byte_length: i64,
     pub rows_text: String,
 }
 
@@ -51,6 +54,7 @@ pub struct BrowserTailChunkResponse {
     pub status: BrowserTailStatus,
     pub inserted_count: usize,
     pub skipped_count: usize,
+    pub rejected_count: usize,
     pub replayed: bool,
 }
 
@@ -82,7 +86,7 @@ pub async fn open_file(
     let source_id = valid_source_id(&request.source_id)?;
     let source_name = non_empty(&request.source_name, "source_name")?;
     let file_name = valid_file_name(&request.file_name)?;
-    let header_line = valid_header(&request.header_line)?;
+    let header_line = valid_header(&file_name, &request.header_line)?;
 
     if request.file_size < 0 || request.last_modified_ms < 0 {
         bail!("file size and modified time must not be negative");
@@ -160,23 +164,31 @@ pub async fn open_file(
 
     if let (Some(active_file_name), Some(active_run_id)) =
         (source.active_file_name.as_deref(), source.active_run_id)
+        && active_file_name != file_name
     {
-        if active_file_name != file_name {
-            complete_file(pool, &source_id, active_file_name, active_run_id).await?;
-        }
+        complete_file(pool, &source_id, active_file_name, active_run_id).await?;
     }
 
-    let run_id = create_run(
-        pool,
-        CreateRunRequest {
-            name: file_name.clone(),
-            source_kind: "csv_tail".to_string(),
-            source_name: Some(format!("{source_name}/{file_name}")),
-            started_at: None,
-            notes: Some("CSV selected in the operator browser and tailed over HTTPS".to_string()),
-        },
-    )
-    .await?;
+    let run_id = match source.active_run_id {
+        Some(run_id) => run_id,
+        None => {
+            create_run(
+                pool,
+                CreateRunRequest {
+                    name: source_name.clone(),
+                    source_kind: "csv_tail".to_string(),
+                    source_name: Some(source_name.clone()),
+                    started_at: None,
+                    notes: Some(
+                        "Continuous browser CSV stream; may span daily files over HTTPS"
+                            .to_string(),
+                    ),
+                },
+            )
+            .await?
+        }
+    };
+    let last_source_sequence = last_source_sequence_for_source(pool, &source_id, run_id).await?;
 
     sqlx::query(
         r#"
@@ -192,7 +204,7 @@ pub async fn open_file(
             completed,
             updated_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, 0, ?8)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9)
         "#,
     )
     .bind(&source_id)
@@ -200,6 +212,7 @@ pub async fn open_file(
     .bind(run_id)
     .bind(&header_line)
     .bind(request.header_end_offset)
+    .bind(last_source_sequence)
     .bind(request.file_size)
     .bind(request.last_modified_ms)
     .bind(&timestamp)
@@ -233,10 +246,12 @@ pub async fn sync_chunk(
     if request.offset < 0 {
         bail!("offset must not be negative");
     }
-    if request.rows_text.is_empty() {
-        bail!("rows_text must not be empty");
+    if request.rows_text.is_empty() || request.byte_length <= 0 {
+        bail!("rows_text and byte_length must not be empty");
     }
-    if request.rows_text.len() > MAX_CHUNK_BYTES {
+    if request.byte_length as usize > MAX_CHUNK_BYTES
+        || request.rows_text.len() > MAX_CHUNK_BYTES.saturating_mul(3)
+    {
         bail!("CSV chunk exceeds the {MAX_CHUNK_BYTES} byte limit");
     }
 
@@ -253,6 +268,7 @@ pub async fn sync_chunk(
             status: status_for_file(pool, &source_id, &file_name).await?,
             inserted_count: 0,
             skipped_count: 0,
+            rejected_count: 0,
             replayed: true,
         });
     }
@@ -263,6 +279,9 @@ pub async fn sync_chunk(
             request.offset
         );
     }
+    if request.offset + request.byte_length > checkpoint.file_size {
+        bail!("CSV chunk exceeds the latest known size of `{file_name}`");
+    }
 
     let mut csv_bytes =
         Vec::with_capacity(checkpoint.header_line.len() + 1 + request.rows_text.len());
@@ -271,15 +290,26 @@ pub async fn sync_chunk(
     csv_bytes.extend_from_slice(request.rows_text.as_bytes());
     let parsed = parse_csv_bytes(&file_name, &csv_bytes)?;
     let sample_count = parsed.frames.len() as i64;
+    let record_count = parsed.record_count as i64;
+    let first_sequence = checkpoint.last_source_sequence + 1;
+    let row_quality_events = parsed.quality_events.clone();
     let (inserted_count, skipped_count) = if sample_count == 0 {
         (0, 0)
     } else {
-        let append_request = parsed_to_append_request(parsed, checkpoint.last_source_sequence + 1);
+        let append_request = parsed_to_append_request(parsed, first_sequence);
         let report = append_samples(pool, checkpoint.run_id, append_request).await?;
         (report.inserted_count, report.skipped_count)
     };
-    let new_offset = checkpoint.byte_offset + request.rows_text.len() as i64;
-    let new_sequence = checkpoint.last_source_sequence + sample_count;
+    let rejected_count = record_csv_row_quality_events(
+        pool,
+        checkpoint.run_id,
+        &file_name,
+        &row_quality_events,
+        first_sequence,
+    )
+    .await?;
+    let new_offset = checkpoint.byte_offset + request.byte_length;
+    let new_sequence = checkpoint.last_source_sequence + record_count;
     let timestamp = now();
 
     sqlx::query(
@@ -313,6 +343,7 @@ pub async fn sync_chunk(
         status: status_for_file(pool, &source_id, &file_name).await?,
         inserted_count,
         skipped_count,
+        rejected_count,
         replayed: false,
     })
 }
@@ -381,7 +412,7 @@ async fn complete_file(
     pool: &SqlitePool,
     source_id: &str,
     file_name: &str,
-    run_id: i64,
+    _run_id: i64,
 ) -> anyhow::Result<()> {
     let timestamp = now();
     sqlx::query(
@@ -392,22 +423,30 @@ async fn complete_file(
     .bind(&timestamp)
     .execute(pool)
     .await?;
-    sqlx::query(
-        r#"
-        UPDATE runs
-        SET
-            status = 'completed',
-            finished_at = COALESCE(
-                finished_at,
-                (SELECT MAX(sampled_at) FROM sample_frames WHERE run_id = ?1)
-            )
-        WHERE id = ?1 AND status = 'running'
-        "#,
+    Ok(())
+}
+
+async fn last_source_sequence_for_source(
+    pool: &SqlitePool,
+    source_id: &str,
+    run_id: i64,
+) -> anyhow::Result<i64> {
+    let file_sequence = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT MAX(last_source_sequence) FROM browser_tail_files WHERE source_id = ?1",
+    )
+    .bind(source_id)
+    .fetch_one(pool)
+    .await?
+    .unwrap_or(1);
+    let sample_sequence = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT MAX(source_row_number) FROM sample_frames WHERE run_id = ?1",
     )
     .bind(run_id)
-    .execute(pool)
-    .await?;
-    Ok(())
+    .fetch_one(pool)
+    .await?
+    .unwrap_or(1);
+
+    Ok(file_sequence.max(sample_sequence))
 }
 
 async fn load_source(
@@ -456,12 +495,19 @@ fn parsed_to_append_request(parsed: ParsedCsv, first_sequence: i64) -> AppendSam
     let samples = parsed
         .frames
         .into_iter()
-        .enumerate()
-        .map(|(index, frame)| AppendSampleRequest {
+        .map(|frame| AppendSampleRequest {
             sampled_at: frame.sampled_at,
             source_timestamp_text: Some(frame.source_timestamp_text),
-            source_sequence: Some(first_sequence + index as i64),
-            state_observation: None,
+            source_sequence: Some(first_sequence + frame.source_row_number - 2),
+            state_observation: frame.state_observation.map(|observation| {
+                AppendStateObservationRequest {
+                    source_recipe_code: observation.source_recipe_code,
+                    source_recipe_version: observation.source_recipe_version,
+                    source_state_code: observation.source_state_code,
+                    source_state_name: observation.source_state_name,
+                    source_payload_json: observation.source_payload_json,
+                }
+            }),
             measurements: frame
                 .measurements
                 .into_iter()
@@ -505,16 +551,8 @@ fn valid_file_name(value: &str) -> anyhow::Result<String> {
     Ok(value)
 }
 
-fn valid_header(value: &str) -> anyhow::Result<String> {
-    let value = value.trim_start_matches('\u{feff}').trim().to_string();
-    if value.len() > 64 * 1024 || value.contains('\n') || value.contains('\r') {
-        bail!("CSV header is invalid");
-    }
-    let columns = value.split(';').map(str::trim).collect::<Vec<_>>();
-    if !columns.contains(&"TARIH SAAT") || columns.len() < 2 {
-        bail!("CSV header must contain `TARIH SAAT` and at least one measurement channel");
-    }
-    Ok(value)
+fn valid_header(file_name: &str, value: &str) -> anyhow::Result<String> {
+    validate_csv_header(file_name, value)
 }
 
 fn non_empty(value: &str, label: &str) -> anyhow::Result<String> {

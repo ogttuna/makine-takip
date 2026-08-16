@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test:frontend": "node --test src/features/source/folderDrop.test.ts",
+    "test:frontend": "node --test src/features/source/folderDrop.test.ts src/csvByteHandling.test.ts src/csvFileOrdering.test.ts src/incrementalSamples.test.ts",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "collector:dev": "cargo run -p collector",
