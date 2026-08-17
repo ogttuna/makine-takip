@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { logFileDateKey, scanStartIndex, sortCsvFiles } from "./csvFileOrdering.ts";
+import {
+  isDownloadDuplicateCsvName,
+  logFileDateKey,
+  scanStartIndex,
+  sortCsvFiles,
+} from "./csvFileOrdering.ts";
 
 test("orders machine log files by the date in their names instead of copy time", () => {
   const files = [
@@ -40,4 +45,42 @@ test("resumes at the first dated file after a missing active file", () => {
 test("rejects impossible dates in machine log file names", () => {
   assert.equal(logFileDateKey("LogFile_2026_02_29.csv"), null);
   assert.equal(logFileDateKey("LogFile_2028_02_29.csv"), 20280229);
+});
+
+test("keeps valid daily files in date order when an unrelated CSV has a newer copy time", () => {
+  const files = [
+    { name: "LogFile_2026_08_14 (1).csv", lastModified: 1 },
+    { name: "LogFile_2026_08_14.csv", lastModified: 4 },
+    { name: "LogFile_2026_06_11.csv", lastModified: 3 },
+  ];
+
+  assert.deepEqual(
+    sortCsvFiles(files).map((file) => file.name),
+    [
+      "LogFile_2026_06_11.csv",
+      "LogFile_2026_08_14.csv",
+      "LogFile_2026_08_14 (1).csv",
+    ],
+  );
+});
+
+test("recognizes browser download copies without accepting them as daily log names", () => {
+  assert.equal(isDownloadDuplicateCsvName("LogFile_2026_08_14 (1).csv"), true);
+  assert.equal(isDownloadDuplicateCsvName("LogFile_2026_08_14 (23).csv"), true);
+  assert.equal(isDownloadDuplicateCsvName("LogFile_2026_08_14.csv"), false);
+});
+
+test("recovers from an obsolete malformed active filename using valid daily checkpoints", () => {
+  const files = sortCsvFiles([
+    { name: "LogFile_2026_08_13.csv", lastModified: 1 },
+    { name: "LogFile_2026_08_14.csv", lastModified: 2 },
+  ]);
+
+  assert.equal(
+    scanStartIndex(files, {
+      active_file_name: "LogFile_2026_08_14 (1).csv",
+      last_modified_ms: 999,
+    }),
+    0,
+  );
 });

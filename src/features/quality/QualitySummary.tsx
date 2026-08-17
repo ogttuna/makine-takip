@@ -36,8 +36,16 @@ export function QualitySummary({
   }, {});
   const gapCount = counts.time_gap ?? 0;
   const suspectCount = counts.suspect_value ?? 0;
-  const filteredEvents =
-    filter === "all" ? events : events.filter((event) => event.event_type === filter);
+  const otherCount = Math.max(0, events.length - gapCount - suspectCount);
+  const filteredEvents = events.filter((event) => {
+    if (filter === "all") {
+      return true;
+    }
+    if (filter === "other") {
+      return event.event_type !== "time_gap" && event.event_type !== "suspect_value";
+    }
+    return event.event_type === filter;
+  });
   const visibleEvents = filteredEvents.slice(0, visibleLimit);
 
   return (
@@ -67,6 +75,12 @@ export function QualitySummary({
           label={copy.filters.suspect}
           onClick={() => onFilterChange("suspect_value")}
         />
+        <FilterButton
+          active={filter === "other"}
+          count={otherCount}
+          label={copy.filters.other}
+          onClick={() => onFilterChange("other")}
+        />
       </div>
       {isLoading ? (
         <span>{copy.loading}</span>
@@ -84,7 +98,7 @@ export function QualitySummary({
       ) : (
         <div className="quality-overview">
           <strong>{qualityFilterHeadline(filter, filteredEvents.length, copy)}</strong>
-          <span>{qualityFilterDescription(filter, gapCount, suspectCount, copy)}</span>
+          <span>{qualityFilterDescription(filter, gapCount, suspectCount, otherCount, copy)}</span>
           <div className="quality-breakdown" aria-label={copy.breakdownLabel}>
             <div>
               <span>{copy.breakdownGap}</span>
@@ -93,6 +107,10 @@ export function QualitySummary({
             <div>
               <span>{copy.breakdownSuspect}</span>
               <strong>{suspectCount}</strong>
+            </div>
+            <div>
+              <span>{copy.breakdownOther}</span>
+              <strong>{otherCount}</strong>
             </div>
           </div>
         </div>
@@ -167,6 +185,10 @@ function qualityFilterHeadline(
     return copy.headlineSuspect(count);
   }
 
+  if (filter === "other") {
+    return copy.headlineOther(count);
+  }
+
   return copy.headlineAll(count);
 }
 
@@ -174,6 +196,7 @@ function qualityFilterDescription(
   filter: QualityFilter,
   gapCount: number,
   suspectCount: number,
+  otherCount: number,
   copy: AppCopy["quality"],
 ): string {
   if (filter === "time_gap") {
@@ -184,7 +207,11 @@ function qualityFilterDescription(
     return copy.descSuspect;
   }
 
-  return copy.descAll(gapCount, suspectCount);
+  if (filter === "other") {
+    return copy.descOther;
+  }
+
+  return copy.descAll(gapCount, suspectCount, otherCount);
 }
 
 function qualityEventView(
@@ -229,6 +256,41 @@ function qualityEventView(
       location: event.channel_code ? `${channelName} - ${location}` : location,
       meta: time,
       detail: copy.suspectDetail(channelName, rawValue),
+    };
+  }
+
+  if (event.event_type === "parse_error") {
+    const channelName = event.channel_code
+      ? channelLabel(event.channel_code, locale)
+      : copy.channel;
+    const rawValue =
+      stringFromMetadata(metadata, "raw_text") ??
+      suspectValueFromMessage(event.message) ??
+      copy.unknownValue;
+
+    return {
+      title: copy.invalidCellTitle,
+      location: event.channel_code ? `${channelName} - ${location}` : location,
+      meta: time,
+      detail: copy.invalidCellDetail(channelName, rawValue),
+    };
+  }
+
+  if (event.event_type === "csv_row_timestamp_error") {
+    return {
+      title: copy.invalidTimestampTitle,
+      location,
+      meta: time,
+      detail: copy.invalidTimestampDetail(event.source_timestamp_text ?? copy.unknownValue),
+    };
+  }
+
+  if (event.event_type.startsWith("csv_row_")) {
+    return {
+      title: copy.invalidRowTitle,
+      location,
+      meta: time,
+      detail: copy.invalidRowDetail,
     };
   }
 

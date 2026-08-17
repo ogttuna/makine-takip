@@ -15,7 +15,12 @@ import {
   setBrowserTailEnabled,
 } from "./browserTailStorage";
 import { completeLinePrefixLength, decodeCsvRows } from "./csvByteHandling";
-import { logFileDateKey, scanStartIndex, sortCsvFiles } from "./csvFileOrdering";
+import {
+  isDownloadDuplicateCsvName,
+  logFileDateKey,
+  scanStartIndex,
+  sortCsvFiles,
+} from "./csvFileOrdering";
 
 const SCAN_INTERVAL_MS = 30_000;
 const MAX_CHUNK_BYTES = 512 * 1024;
@@ -47,6 +52,16 @@ export type BrowserCsvTailState = {
 
 type BrowserCsvTailOptions = {
   onSynced?: (runId: number | null, insertedCount: number, rejectedCount: number) => void;
+};
+
+type CsvFileIssue = {
+  fileName: string;
+  message: string;
+};
+
+type PreparedCsvFile = {
+  file: File;
+  header: { line: string; endOffset: number };
 };
 
 export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
@@ -119,7 +134,9 @@ export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
         throw new Error("İnternet bağlantısı bekleniyor; CSV checkpoint'i korunuyor.");
       }
 
-      const files = await csvFiles(directory);
+      const listing = await csvFiles(directory);
+      const files = listing.files;
+      const fileIssues = [...listing.issues];
       let serverStatus = await fetchBrowserTailStatus(sourceIdRef.current);
       let insertedCount = 0;
       let rejectedCount = 0;
@@ -130,43 +147,70 @@ export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
           retryRef.current = null;
         }
         retryAttemptRef.current = 0;
+        const issueMessage = fileIssueSummary(fileIssues);
         setState((current) => ({
           ...current,
-          status: "tailing",
+          status: issueMessage ? "degraded" : "tailing",
           lastScanAt: new Date().toISOString(),
-          lastError: null,
+          lastError: issueMessage,
         }));
         return;
       }
 
       const startIndex = scanStartIndex(files, serverStatus);
-      for (let index = startIndex; index < files.length; index += 1) {
-        const file = files[index];
-        const header = await readHeader(file);
-        const opened = await openBrowserTailFile({
-          source_id: sourceIdRef.current,
-          source_name: directory.name,
-          file_name: file.name,
-          header_line: header.line,
-          header_end_offset: header.endOffset,
-          file_size: file.size,
-          last_modified_ms: file.lastModified,
-        });
+      const preparedFiles: PreparedCsvFile[] = [];
+      for (const file of files.slice(startIndex)) {
+        try {
+          preparedFiles.push({ file, header: await readHeader(file) });
+        } catch (error) {
+          fileIssues.push({ fileName: file.name, message: errorMessage(error) });
+        }
+      }
+
+      for (let index = 0; index < preparedFiles.length; index += 1) {
+        const { file, header } = preparedFiles[index];
+        let opened: BrowserTailStatus;
+
+        try {
+          opened = await openBrowserTailFile({
+            source_id: sourceIdRef.current,
+            source_name: directory.name,
+            file_name: file.name,
+            header_line: header.line,
+            header_end_offset: header.endOffset,
+            file_size: file.size,
+            last_modified_ms: file.lastModified,
+          });
+        } catch (error) {
+          if (isConnectivityError(error)) {
+            throw error;
+          }
+          fileIssues.push({ fileName: file.name, message: errorMessage(error) });
+          continue;
+        }
 
         if (opened.completed) {
           serverStatus = opened;
           continue;
         }
 
-        const result = await syncFile(
-          sourceIdRef.current,
-          file,
-          opened,
-          index < files.length - 1,
-        );
-        serverStatus = result.status;
-        insertedCount += result.insertedCount;
-        rejectedCount += result.rejectedCount;
+        try {
+          const result = await syncFile(
+            sourceIdRef.current,
+            file,
+            opened,
+            index < preparedFiles.length - 1,
+          );
+          serverStatus = result.status;
+          insertedCount += result.insertedCount;
+          rejectedCount += result.rejectedCount;
+        } catch (error) {
+          if (isConnectivityError(error)) {
+            throw error;
+          }
+          fileIssues.push({ fileName: file.name, message: errorMessage(error) });
+          break;
+        }
       }
 
       if (retryRef.current !== null) {
@@ -175,9 +219,10 @@ export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
       }
       retryAttemptRef.current = 0;
       const currentStatus = serverStatus;
+      const issueMessage = fileIssueSummary(fileIssues);
       setState((current) => ({
         ...current,
-        status: "tailing",
+        status: issueMessage ? "degraded" : "tailing",
         directoryName: directory.name,
         activeFileName: currentStatus?.active_file_name ?? null,
         activeRunId: currentStatus?.active_run_id ?? null,
@@ -185,7 +230,7 @@ export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
         lastSourceSequence: currentStatus?.last_source_sequence ?? null,
         lastSampledAt: currentStatus?.last_sampled_at ?? null,
         lastScanAt: new Date().toISOString(),
-        lastError: null,
+        lastError: issueMessage,
       }));
       onSyncedRef.current?.(
         currentStatus?.active_run_id ?? null,
@@ -194,7 +239,7 @@ export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
       );
     } catch (error) {
       const message = errorMessage(error);
-      const offline = !navigator.onLine || /fetch|network|internet|bağlantı/i.test(message);
+      const offline = isConnectivityError(error);
       setState((current) => ({
         ...current,
         status: offline ? "offline" : "degraded",
@@ -392,16 +437,35 @@ export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
   };
 }
 
-async function csvFiles(directory: FileSystemDirectoryHandle): Promise<File[]> {
+async function csvFiles(
+  directory: FileSystemDirectoryHandle,
+): Promise<{ files: File[]; issues: CsvFileIssue[] }> {
   const files: File[] = [];
+  const issues: CsvFileIssue[] = [];
   for await (const [, entry] of directory.entries()) {
     if (entry.kind !== "file" || !entry.name.toLocaleLowerCase("en-US").endsWith(".csv")) {
       continue;
     }
-    files.push(await (entry as FileSystemFileHandle).getFile());
+
+    if (isDownloadDuplicateCsvName(entry.name)) {
+      issues.push({
+        fileName: entry.name,
+        message: `${entry.name}: indirilen kopya adı atlandı; dosyayı LogFile_YYYY_MM_DD.csv biçiminde tutun.`,
+      });
+      continue;
+    }
+
+    try {
+      files.push(await (entry as FileSystemFileHandle).getFile());
+    } catch (error) {
+      issues.push({
+        fileName: entry.name,
+        message: `${entry.name}: dosya okunamadı (${errorMessage(error)}).`,
+      });
+    }
   }
 
-  return sortCsvFiles(files);
+  return { files: sortCsvFiles(files), issues };
 }
 
 async function readHeader(file: File): Promise<{ line: string; endOffset: number }> {
@@ -419,8 +483,10 @@ async function readHeader(file: File): Promise<{ line: string; endOffset: number
     .decode(headerBytes)
     .replace(/^\uFEFF/, "")
     .trim();
-  const columns = line.split(";").map((column) => column.trim());
-  const hasFullTimestamp = columns.includes("TARIH SAAT");
+  const columns = line
+    .split(";")
+    .map((column) => column.trim().replace(/^"(.*)"$/, "$1").toLocaleUpperCase("tr-TR"));
+  const hasFullTimestamp = columns.includes("TARİH SAAT") || columns.includes("TARIH SAAT");
   const hasTimeOnly = columns.includes("SAAT");
 
   if (hasFullTimestamp === hasTimeOnly) {
@@ -482,4 +548,23 @@ async function syncFile(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "CSV klasörü okunamadı.";
+}
+
+function isConnectivityError(error: unknown): boolean {
+  const message = errorMessage(error);
+  return !navigator.onLine || /fetch|network|internet|bağlantı/i.test(message);
+}
+
+function fileIssueSummary(issues: CsvFileIssue[]): string | null {
+  if (issues.length === 0) {
+    return null;
+  }
+
+  const uniqueIssues = [
+    ...new Map(issues.map((issue) => [issue.fileName, issue] as const)).values(),
+  ];
+  const visibleMessages = uniqueIssues.slice(0, 3).map((issue) => issue.message);
+  const hiddenCount = uniqueIssues.length - visibleMessages.length;
+  const hiddenMessage = hiddenCount > 0 ? ` ${hiddenCount} dosya daha atlandı.` : "";
+  return `${visibleMessages.join(" ")}${hiddenMessage} Diğer geçerli CSV'lerin takibi sürüyor.`;
 }

@@ -172,9 +172,12 @@ proxy arkasinda yayinlayin.
 
 Klasor secildikten sonra sistem:
 
-- klasordeki eski `*.csv` dosyalarini ayni run'a ekler; tum dosyalar
-  `LogFile_YYYY_MM_DD.csv` formatindaysa kopyalanma zamanindan bagimsiz olarak
-  adlarindaki tarihe gore siralar,
+- klasordeki eski `*.csv` dosyalarini ayni run'a ekler; gecerli
+  `LogFile_YYYY_MM_DD.csv` dosyalarini klasordeki baska bir CSV'nin adindan veya
+  kopyalanma zamanindan etkilenmeden adlarindaki tarihe gore siralar,
+- `LogFile_YYYY_MM_DD (1).csv` gibi tarayici/indirme kopyalarini ikinci kez
+  yazmak yerine atlar, operatoru uyarir ve diger gecerli dosyalari izlemeye
+  devam eder,
 - en yeni dosyayi artimli okumaya baslar,
 - yalnizca satir sonu tamamlanmis yeni kayitlari isler,
 - byte ve source-sequence checkpoint'ini sunucudaki SQLite'ta saklar,
@@ -192,6 +195,11 @@ Desteklenen iki zaman formati vardir:
 - `SAAT`: `00:03`, `00:03:15` veya `00:03:15.250`. Bu bicimde tarih
   `LogFile_2026_08_13.csv` dosya adindan alinir.
 
+Excel'in guvenli metin bicimi degisiklikleri de kabul edilir: basliklarda
+buyuk/kucuk harf ve tirnak, `10,5` gibi virgul ondalik ve
+`14.08.2026 00:03:00` gibi yerellesmis tam tarih-saat degerleri ham metin
+korunarak normalize edilir.
+
 CSV hatalari satir/hücre seviyesinde izole edilir:
 
 - gecersiz sayisal hucre ham metniyle ve `invalid` kalitesiyle saklanir; satirin
@@ -205,14 +213,20 @@ CSV hatalari satir/hücre seviyesinde izole edilir:
   gecersiz olarak isaretlenirken checkpoint kaynak dosyanin gercek byte
   konumuyla ilerler,
 - yarim yazilmis son satir tamamlanana kadar bekletilir,
-- header okunamiyorsa sema guvenle belirlenemeyecegi icin o dosya hata olarak
-  gosterilir.
+- header okunamiyorsa sema guvenle belirlenemeyecegi icin o dosya atlanip hata
+  olarak gosterilir; klasordeki diger gecerli dosyalar takip edilmeye devam
+  eder.
 
 Grafik zamani polling anindan degil CSV zamanindan gelir. Ornegin 10:00
 kaydindan sonra sonraki kayit 10:07 ise sistem noktayi tam 10:07'ye yazar;
 araya veri uydurmaz, onceki satiri tekrar etmez ve zamani kaydirmaz. 360
 saniyeden buyuk aralik `time_gap` uyarisi olur ve grafik cizgisi bu boslukta
 kesilir.
+
+Grafik cok gunluk bir kosuda eksende tarihi gosterir. Proses-state bantlari
+korunur, ancak `START`/`STOP` gibi bir etiket kendi bandina sigmiyorsa ust uste
+binmemesi icin gizlenir. Grafik basligi gorunen kayit sayisini ve canli kosuda
+o anda izlenen dosyayi gosterir.
 
 Ilgili endpointler:
 

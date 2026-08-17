@@ -617,6 +617,31 @@ h2 {
   margin-bottom: 12px;
 }
 
+.chart-heading-copy {
+  min-width: 0;
+}
+
+.chart-context {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.chart-context span {
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  padding: 4px 8px;
+  font-size: 0.72rem;
+  font-weight: 850;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .section-heading.compact {
   margin-bottom: 0;
 }
@@ -1463,7 +1488,7 @@ h2 {
 
 .quality-filters {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
   gap: 6px;
 }
 
@@ -1521,7 +1546,7 @@ h2 {
 
 .quality-breakdown {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
   gap: 6px;
 }
 

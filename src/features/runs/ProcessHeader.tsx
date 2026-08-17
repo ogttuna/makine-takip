@@ -1,4 +1,5 @@
 import type { QualityEvent, RunAnalysis, RunSummary, SampleFrame } from "../../api";
+import { chronologicalSamples } from "../../chartTimeline";
 import type { AppCopy, Locale } from "../../i18n";
 import { durationLabel, formatDate, sourceKindLabel } from "../../utils/format";
 
@@ -20,8 +21,10 @@ export function ProcessHeader({
   samples: SampleFrame[];
 }) {
   const quality = qualityCounts(qualityEvents);
-  const firstSample = samples[0]?.sampled_at ?? run?.started_at ?? null;
-  const lastSample = samples[samples.length - 1]?.sampled_at ?? run?.finished_at ?? null;
+  const orderedSamples = chronologicalSamples(samples);
+  const firstSample = orderedSamples[0]?.sampled_at ?? run?.started_at ?? null;
+  const lastSample =
+    orderedSamples[orderedSamples.length - 1]?.sampled_at ?? run?.finished_at ?? null;
   const currentSegment =
     analysis && analysis.segments.length > 0
       ? analysis.segments[analysis.segments.length - 1]
@@ -48,7 +51,7 @@ export function ProcessHeader({
           tone={quality.total > 0 ? "warning" : "ok"}
           value={
             quality.total > 0
-              ? copy.qualityValue(quality.timeGap, quality.suspect)
+              ? copy.qualityValue(quality.timeGap, quality.suspect, quality.other)
               : copy.noWarning
           }
         />
@@ -95,7 +98,7 @@ function ProcessFact({
 }
 
 function qualityCounts(events: QualityEvent[]) {
-  return events.reduce(
+  const counts = events.reduce(
     (acc, event) => {
       acc.total += 1;
 
@@ -111,4 +114,9 @@ function qualityCounts(events: QualityEvent[]) {
     },
     { suspect: 0, timeGap: 0, total: 0 },
   );
+
+  return {
+    ...counts,
+    other: Math.max(0, counts.total - counts.timeGap - counts.suspect),
+  };
 }

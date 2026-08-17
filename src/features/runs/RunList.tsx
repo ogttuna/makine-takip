@@ -52,7 +52,7 @@ export function RunList({
         >
           <div>
             <strong>{run.name}</strong>
-            <span>{copy.rowSummary(run.row_count, run.warning_count)}</span>
+            <span>{copy.rowSummary(run.row_count, run.warning_count, run.error_count)}</span>
           </div>
           <time>{run.started_at ? formatDate(run.started_at, locale) : "-"}</time>
         </button>

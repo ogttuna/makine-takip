@@ -21,6 +21,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { ProcessStateSegment, QualityEvent, SampleFrame } from "./api";
 import {
+  chronologicalSamples,
+  formatTimelineAxis,
+  stateLabelFits,
+  timelineExtent,
+} from "./chartTimeline";
+import {
   channelColor,
   channelLabel,
   getChannelConfig,
@@ -117,18 +123,32 @@ export function TelemetryChart({
 }: TelemetryChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<EChartsType | null>(null);
+  const [chartWidth, setChartWidth] = useState(0);
   const [legendSelection, setLegendSelection] = useState<Record<string, boolean>>({});
+  const chartSamples = useMemo(() => chronologicalSamples(samples), [samples]);
+  const chartExtent = useMemo(() => timelineExtent(chartSamples), [chartSamples]);
   const series = useMemo(
     () =>
       buildSeries(
-        samples,
+        chartSamples,
         qualityEvents,
         processSegments,
         visibleChannels,
         themeMode,
         locale,
+        chartWidth,
+        variant,
       ),
-    [locale, processSegments, qualityEvents, samples, themeMode, visibleChannels],
+    [
+      chartSamples,
+      chartWidth,
+      locale,
+      processSegments,
+      qualityEvents,
+      themeMode,
+      variant,
+      visibleChannels,
+    ],
   );
 
   useEffect(() => {
@@ -140,10 +160,14 @@ export function TelemetryChart({
       renderer: "canvas",
     });
 
-    const resizeObserver = new ResizeObserver(() => {
+    const updateSize = () => {
       chartRef.current?.resize();
-    });
+      const width = Math.round(containerRef.current?.getBoundingClientRect().width ?? 0);
+      setChartWidth((current) => (current === width ? current : width));
+    };
+    const resizeObserver = new ResizeObserver(updateSize);
     resizeObserver.observe(containerRef.current);
+    updateSize();
 
     return () => {
       resizeObserver.disconnect();
@@ -264,7 +288,7 @@ export function TelemetryChart({
           color: palette.axisText,
           fontFamily: CHART_FONT_FAMILY,
           fontWeight: 600,
-          formatter: (value) => formatAxisTime(value, locale),
+          formatter: (value) => formatTimelineAxis(value, locale, chartExtent?.spanMs ?? 0),
           hideOverlap: true,
         },
         axisLine: {
@@ -278,7 +302,7 @@ export function TelemetryChart({
     };
 
     chartRef.current.setOption(option, true);
-  }, [legendSelection, locale, series, showSlider, themeMode, variant]);
+  }, [chartExtent?.spanMs, legendSelection, locale, series, showSlider, themeMode, variant]);
 
   return (
     <div
@@ -309,6 +333,8 @@ function buildSeries(
   visibleChannels: string[],
   themeMode: "light" | "dark",
   locale: Locale,
+  chartWidth: number,
+  variant: "large" | "compact",
 ): {
   colors: string[];
   series: Array<LineSeriesOption | ScatterSeriesOption>;
@@ -318,6 +344,7 @@ function buildSeries(
   const palette = chartPalette(themeMode);
   const axisLayout = buildAxisLayout(channels, palette, locale);
   const colors = channels.map((channel) => channelColor(channel, themeMode));
+  const extent = timelineExtent(samples);
   const suspectLabel = locale === "en" ? "suspect" : "şüpheli";
   const eventByFrameChannel = new Set(
     qualityEvents
@@ -453,6 +480,51 @@ function buildSeries(
 
   if (stateAreaTarget && processSegments.length > 0 && samples.length > 0) {
     const lastSampledAt = samples[samples.length - 1].sampled_at;
+    const plotWidth = Math.max(0, chartWidth - (variant === "compact" ? 120 : 134));
+    const stateAreas = processSegments.flatMap((segment) => {
+      const finishedAt = segment.finished_at ?? lastSampledAt;
+      const stateName = stateDisplayName(segment.state_code, locale);
+      const startMs = Date.parse(segment.started_at);
+      const finishMs = Date.parse(finishedAt);
+
+      if (!Number.isFinite(startMs) || !Number.isFinite(finishMs) || finishMs <= startMs) {
+        return [];
+      }
+
+      const showLabel = stateLabelFits(
+        segment.started_at,
+        finishedAt,
+        stateName,
+        extent,
+        plotWidth,
+      );
+
+      return [
+        [
+          {
+            name: stateName,
+            xAxis: segment.started_at,
+            itemStyle: {
+              color: stateAreaColor(segment.state_code, themeMode),
+            },
+            label: {
+              show: showLabel,
+            },
+          },
+          {
+            xAxis: finishedAt,
+          },
+        ],
+      ];
+    });
+
+    if (stateAreas.length === 0) {
+      return { colors, series: result, yAxis: axisLayout.yAxis };
+    }
+
+    stateAreaTarget.labelLayout = {
+      hideOverlap: true,
+    };
     stateAreaTarget.markArea = {
       silent: true,
       label: {
@@ -463,18 +535,7 @@ function buildSeries(
         fontWeight: 700,
         position: "insideTop",
       },
-      data: processSegments.map((segment) => [
-        {
-          name: stateDisplayName(segment.state_code, locale),
-          xAxis: segment.started_at,
-          itemStyle: {
-            color: stateAreaColor(segment.state_code, themeMode),
-          },
-        },
-        {
-          xAxis: segment.finished_at ?? lastSampledAt,
-        },
-      ]),
+      data: stateAreas,
     } as LineSeriesOption["markArea"];
   }
 
@@ -776,19 +837,6 @@ function escapeHtml(value: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
-}
-
-function formatAxisTime(value: number | string, locale: Locale): string {
-  const timestamp = typeof value === "number" ? value : Date.parse(value);
-
-  if (!Number.isFinite(timestamp)) {
-    return String(value);
-  }
-
-  return new Intl.DateTimeFormat(locale === "en" ? "en-US" : "tr-TR", {
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(timestamp));
 }
 
 function numericValuesForChannel(samples: SampleFrame[], channel: string) {

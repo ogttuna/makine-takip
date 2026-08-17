@@ -5,18 +5,23 @@ type CsvFileLike = Pick<File, "lastModified" | "name">;
 export function sortCsvFiles<T extends CsvFileLike>(files: T[]): T[] {
   const datedFiles = files.map((file) => ({ file, dateKey: logFileDateKey(file.name) }));
 
-  if (datedFiles.every((entry) => entry.dateKey !== null)) {
-    return datedFiles
-      .sort(
-        (left, right) =>
-          left.dateKey! - right.dateKey! || left.file.name.localeCompare(right.file.name),
-      )
-      .map((entry) => entry.file);
-  }
-
-  return [...files].sort(
-    (left, right) => left.lastModified - right.lastModified || left.name.localeCompare(right.name),
-  );
+  return datedFiles
+    .sort((left, right) => {
+      if (left.dateKey !== null && right.dateKey !== null) {
+        return left.dateKey - right.dateKey || left.file.name.localeCompare(right.file.name);
+      }
+      if (left.dateKey !== null) {
+        return -1;
+      }
+      if (right.dateKey !== null) {
+        return 1;
+      }
+      return (
+        left.file.lastModified - right.file.lastModified ||
+        left.file.name.localeCompare(right.file.name)
+      );
+    })
+    .map((entry) => entry.file);
 }
 
 export function scanStartIndex(
@@ -33,15 +38,24 @@ export function scanStartIndex(
   }
 
   const activeDate = logFileDateKey(status.active_file_name);
-  if (activeDate !== null && files.every((file) => logFileDateKey(file.name) !== null)) {
+  const allFilesAreDated = files.every((file) => logFileDateKey(file.name) !== null);
+  if (activeDate !== null && allFilesAreDated) {
     const firstNewer = files.findIndex((file) => logFileDateKey(file.name)! > activeDate);
     return firstNewer >= 0 ? firstNewer : files.length;
+  }
+
+  if (activeDate === null && allFilesAreDated) {
+    return 0;
   }
 
   const firstNewer = files.findIndex(
     (file) => file.lastModified > (status.last_modified_ms ?? 0),
   );
   return firstNewer >= 0 ? firstNewer : files.length;
+}
+
+export function isDownloadDuplicateCsvName(fileName: string): boolean {
+  return /^LogFile_\d{4}_\d{2}_\d{2}\s+\(\d+\)\.csv$/i.test(fileName);
 }
 
 export function logFileDateKey(fileName: string): number | null {

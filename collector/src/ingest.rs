@@ -322,10 +322,7 @@ fn prepare_measurement(
         bail!("measurement {channel_code} numeric_value must be finite");
     }
 
-    let parsed_numeric = raw_text
-        .parse::<f64>()
-        .ok()
-        .filter(|value| value.is_finite());
+    let parsed_numeric = crate::csv_import::parse_numeric_value(&raw_text);
     let numeric_value = provided_numeric.or(parsed_numeric);
     let value_type = measurement.value_type.unwrap_or_else(|| {
         if numeric_value.is_some() {

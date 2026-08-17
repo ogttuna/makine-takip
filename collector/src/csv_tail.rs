@@ -969,6 +969,11 @@ fn discover_files(directory_path: &str, pattern: &str) -> anyhow::Result<Vec<Fil
             continue;
         }
 
+        if is_download_duplicate_name(&file_name) {
+            tracing::warn!(%file_name, "skipping browser/download duplicate CSV name");
+            continue;
+        }
+
         files.push(FileCandidate {
             path: entry.path().to_string_lossy().to_string(),
             modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
@@ -976,19 +981,17 @@ fn discover_files(directory_path: &str, pattern: &str) -> anyhow::Result<Vec<Fil
         });
     }
 
-    if files.iter().all(|file| file.log_date.is_some()) {
-        files.sort_by(|left, right| {
-            left.log_date
-                .cmp(&right.log_date)
-                .then_with(|| left.path.cmp(&right.path))
-        });
-    } else {
-        files.sort_by(|left, right| {
-            left.modified
-                .cmp(&right.modified)
-                .then_with(|| left.path.cmp(&right.path))
-        });
-    }
+    files.sort_by(|left, right| match (left.log_date, right.log_date) {
+        (Some(left_date), Some(right_date)) => left_date
+            .cmp(&right_date)
+            .then_with(|| left.path.cmp(&right.path)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => left
+            .modified
+            .cmp(&right.modified)
+            .then_with(|| left.path.cmp(&right.path)),
+    });
 
     Ok(files)
 }
@@ -998,6 +1001,25 @@ fn log_file_date(file_name: &str) -> Option<NaiveDate> {
     let date = normalized.strip_prefix("logfile_")?.strip_suffix(".csv")?;
 
     NaiveDate::parse_from_str(date, "%Y_%m_%d").ok()
+}
+
+fn is_download_duplicate_name(file_name: &str) -> bool {
+    let normalized = file_name.to_ascii_lowercase();
+    let Some(stem) = normalized.strip_suffix(".csv") else {
+        return false;
+    };
+    let Some((canonical_stem, copy_number)) = stem.rsplit_once(" (") else {
+        return false;
+    };
+    let Some(copy_number) = copy_number.strip_suffix(')') else {
+        return false;
+    };
+
+    !copy_number.is_empty()
+        && copy_number
+            .chars()
+            .all(|character| character.is_ascii_digit())
+        && log_file_date(&format!("{canonical_stem}.csv")).is_some()
 }
 
 fn matches_pattern(file_name: &str, pattern: &str) -> bool {
@@ -1100,4 +1122,17 @@ fn non_empty(value: String, label: &str) -> anyhow::Result<String> {
 
 fn now() -> String {
     Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_download_duplicate_name;
+
+    #[test]
+    fn recognizes_download_copy_names_without_hiding_canonical_logs() {
+        assert!(is_download_duplicate_name("LogFile_2026_08_14 (1).csv"));
+        assert!(is_download_duplicate_name("LogFile_2026_08_14 (23).CSV"));
+        assert!(!is_download_duplicate_name("LogFile_2026_08_14.csv"));
+        assert!(!is_download_duplicate_name("other (1).csv"));
+    }
 }

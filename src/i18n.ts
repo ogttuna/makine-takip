@@ -50,7 +50,8 @@ export const COPY = {
       view: "Görünüm",
       source: "Kaynak",
       noWarning: "Uyarı yok",
-      qualityValue: (gap: number, suspect: number) => `${gap} boşluk / ${suspect} şüpheli`,
+      qualityValue: (gap: number, suspect: number, other: number) =>
+        `${gap} boşluk / ${suspect} şüpheli / ${other} diğer`,
       activeSignals: (count: number) => `${count} aktif sinyal`,
       inferredState: "Proses durumu",
       noState: "Henüz çıkarılmadı",
@@ -63,6 +64,11 @@ export const COPY = {
       modeAria: "Grafik düzeni",
       overlay: "Üst üste",
       grouped: "Gruplu",
+      visibleSamples: (visible: number, total: number) =>
+        visible < total
+          ? `Son ${visible} / ${total} kayıt gösteriliyor`
+          : `${visible} kayıt birlikte gösteriliyor`,
+      activeFile: (fileName: string) => `Canlı dosya: ${fileName}`,
       loadingTitle: "Grafik yükleniyor",
       loadingMessage: "Grafik alanı hazırlanıyor.",
       unitAssumptionTitle: "Birim varsayımı",
@@ -123,6 +129,7 @@ export const COPY = {
         all: "Tümü",
         gap: "Kayıt aralığı",
         suspect: "Şüpheli",
+        other: "Diğer",
       },
       loading: "Uyarılar yükleniyor...",
       loadError: "Uyarılar yüklenemedi",
@@ -131,13 +138,16 @@ export const COPY = {
       headlineAll: (count: number) => `${count} toplam uyarı`,
       headlineGap: (count: number) => `${count} kayıt aralığı uyarısı`,
       headlineSuspect: (count: number) => `${count} şüpheli değer uyarısı`,
-      descAll: (gap: number, suspect: number) =>
-        `${gap} zaman boşluğu ve ${suspect} şüpheli değer bulundu.`,
+      headlineOther: (count: number) => `${count} diğer veri uyarısı`,
+      descAll: (gap: number, suspect: number, other: number) =>
+        `${gap} zaman boşluğu, ${suspect} şüpheli değer ve ${other} diğer veri uyarısı bulundu.`,
       descGap: "Kayıtlar arasında beklenenden uzun boşluk olan noktalar.",
       descSuspect: "Normal ölçüm gibi kabul edilmeyen sensör değerleri.",
+      descOther: "Bozuk hücre ve satırlar ayrıştırılmış; sağlam kayıtların akışı sürdürülmüştür.",
       breakdownLabel: "Uyarı dağılımı",
       breakdownGap: "Kayıt aralığı",
       breakdownSuspect: "Şüpheli değer",
+      breakdownOther: "Diğer",
       hiddenMore: (count: number) => `${count} uyarı daha gizli.`,
       row: (row: number) => `Satır ${row}`,
       noRow: "Satır yok",
@@ -151,6 +161,15 @@ export const COPY = {
       unknownValue: "bilinmeyen değer",
       suspectDetail: (channel: string, value: string) =>
         `${channel} ${value} değeri gönderdi. Bu değer cihazın özel hata değeri gibi işaretlendi.`,
+      invalidCellTitle: "Okunamayan hücre",
+      invalidCellDetail: (channel: string, value: string) =>
+        `${channel} hücresindeki “${value}” sayı değil; bu hücre atlandı, satırın kalan verisi işlendi.`,
+      invalidTimestampTitle: "Geçersiz zaman",
+      invalidTimestampDetail: (value: string) =>
+        `“${value}” zaman olarak okunamadı; yalnızca bu satır atlandı.`,
+      invalidRowTitle: "Bozuk CSV satırı",
+      invalidRowDetail:
+        "Satırın kolon yapısı okunamadı; yalnızca bu satır atlandı ve takip devam etti.",
       genericTitle: "Veri uyarısı",
     },
     analysis: {
@@ -191,7 +210,8 @@ export const COPY = {
       loading: "Kayıtlı çalışmalar yükleniyor...",
       loadError: "Çalışmalar yüklenemedi",
       empty: "Henüz kayıtlı çalışma yok.",
-      rowSummary: (rows: number, warnings: number) => `${rows} satır, ${warnings} uyarı`,
+      rowSummary: (rows: number, warnings: number, errors: number) =>
+        `${rows} satır, ${warnings} uyarı, ${errors} hata`,
     },
     source: {
       none: "Kaynak yok",
@@ -306,7 +326,8 @@ export const COPY = {
       view: "View",
       source: "Source",
       noWarning: "No warnings",
-      qualityValue: (gap: number, suspect: number) => `${gap} gaps / ${suspect} suspect`,
+      qualityValue: (gap: number, suspect: number, other: number) =>
+        `${gap} gaps / ${suspect} suspect / ${other} other`,
       activeSignals: (count: number) => `${count} active signals`,
       inferredState: "Process state",
       noState: "Not inferred yet",
@@ -319,6 +340,11 @@ export const COPY = {
       modeAria: "Chart layout",
       overlay: "Overlay",
       grouped: "Grouped",
+      visibleSamples: (visible: number, total: number) =>
+        visible < total
+          ? `Showing latest ${visible} / ${total} samples`
+          : `Showing ${visible} samples together`,
+      activeFile: (fileName: string) => `Live file: ${fileName}`,
       loadingTitle: "Loading chart",
       loadingMessage: "Preparing chart area.",
       unitAssumptionTitle: "Unit assumption",
@@ -379,6 +405,7 @@ export const COPY = {
         all: "All",
         gap: "Record gap",
         suspect: "Suspect",
+        other: "Other",
       },
       loading: "Loading warnings...",
       loadError: "Warnings could not be loaded",
@@ -387,13 +414,16 @@ export const COPY = {
       headlineAll: (count: number) => `${count} total warnings`,
       headlineGap: (count: number) => `${count} record gap warnings`,
       headlineSuspect: (count: number) => `${count} suspect value warnings`,
-      descAll: (gap: number, suspect: number) =>
-        `${gap} time gaps and ${suspect} suspect values found.`,
+      headlineOther: (count: number) => `${count} other data warnings`,
+      descAll: (gap: number, suspect: number, other: number) =>
+        `${gap} time gaps, ${suspect} suspect values, and ${other} other data warnings found.`,
       descGap: "Points where records have a longer-than-expected gap.",
       descSuspect: "Sensor values that should not be treated as normal measurements.",
+      descOther: "Malformed cells and rows were isolated while valid records kept flowing.",
       breakdownLabel: "Warning distribution",
       breakdownGap: "Record gap",
       breakdownSuspect: "Suspect value",
+      breakdownOther: "Other",
       hiddenMore: (count: number) => `${count} more warnings hidden.`,
       row: (row: number) => `Row ${row}`,
       noRow: "No row",
@@ -407,6 +437,15 @@ export const COPY = {
       unknownValue: "unknown value",
       suspectDetail: (channel: string, value: string) =>
         `${channel} reported ${value}. This was marked as a device-specific error value.`,
+      invalidCellTitle: "Unreadable cell",
+      invalidCellDetail: (channel: string, value: string) =>
+        `${channel} contains “${value}”, which is not a number; that cell was skipped and the rest of the row was retained.`,
+      invalidTimestampTitle: "Invalid timestamp",
+      invalidTimestampDetail: (value: string) =>
+        `“${value}” could not be read as a timestamp; only this row was skipped.`,
+      invalidRowTitle: "Malformed CSV row",
+      invalidRowDetail:
+        "The row shape could not be decoded; only this row was skipped and monitoring continued.",
       genericTitle: "Data warning",
     },
     analysis: {
@@ -447,7 +486,8 @@ export const COPY = {
       loading: "Loading recorded runs...",
       loadError: "Runs could not be loaded",
       empty: "No recorded runs yet.",
-      rowSummary: (rows: number, warnings: number) => `${rows} rows, ${warnings} warnings`,
+      rowSummary: (rows: number, warnings: number, errors: number) =>
+        `${rows} rows, ${warnings} warnings, ${errors} errors`,
     },
     source: {
       none: "No source",

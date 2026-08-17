@@ -491,9 +491,22 @@ export function App() {
           />
 
           <div className="section-heading chart-heading">
-            <div>
+            <div className="chart-heading-copy">
               <h2>{copy.chart.title}</h2>
               <p>{copy.chart.subtitle}</p>
+              {samples.length > 0 ? (
+                <div className="chart-context" aria-live="polite">
+                  <span>
+                    {copy.chart.visibleSamples(samples.length, selectedRun?.row_count ?? samples.length)}
+                  </span>
+                  {selectedRunId === browserTail.state.activeRunId &&
+                  browserTail.state.activeFileName ? (
+                    <span title={browserTail.state.activeFileName}>
+                      {copy.chart.activeFile(browserTail.state.activeFileName)}
+                    </span>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
             <ChartModeControl
               chartLayout={chartLayout}
