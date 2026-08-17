@@ -60,6 +60,11 @@ export const COPY = {
     chart: {
       title: "Proses grafiği",
       subtitle: "Raf hedefleri, sıcaklıklar, basınç, vakum ve yardımcı sinyaller",
+      rangeLabel: "Zaman",
+      rangeAria: "Grafik zaman aralığı",
+      last24Hours: "24 Saat",
+      last7Days: "7 Gün",
+      allTime: "Tümü",
       modeLabel: "Görünüm",
       modeAria: "Grafik düzeni",
       overlay: "Üst üste",
@@ -342,6 +347,11 @@ export const COPY = {
     chart: {
       title: "Process graph",
       subtitle: "Shelf targets, temperatures, pressure, vacuum, and auxiliary signals",
+      rangeLabel: "Time",
+      rangeAria: "Chart time range",
+      last24Hours: "24 Hours",
+      last7Days: "7 Days",
+      allTime: "All",
       modeLabel: "View",
       modeAria: "Chart layout",
       overlay: "Overlay",

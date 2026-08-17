@@ -233,10 +233,14 @@ araya veri uydurmaz, onceki satiri tekrar etmez ve zamani kaydirmaz. 360
 saniyeden buyuk aralik `time_gap` uyarisi olur ve grafik cizgisi bu boslukta
 kesilir.
 
-Grafik cok gunluk bir kosuda eksende tarihi gosterir. Proses-state bantlari
-korunur, ancak `START`/`STOP` gibi bir etiket kendi bandina sigmiyorsa ust uste
-binmemesi icin gizlenir. Grafik basligi gorunen kayit sayisini ve canli kosuda
-o anda izlenen dosyayi gosterir.
+Grafik varsayilan olarak run'in en yeni kaydina gore kayan son 24 saati
+gosterir; bu nedenle gecmis bir run da bilgisayarin bugunku saatine gore bos
+kalmaz. Operator `24 Saat`, `7 Gun` ve `Tumu` secenekleriyle gorunumu
+degistirebilir. Bu secim yalnizca ekrandaki pencereyi degistirir; SQLite'taki
+ham kayitlari silmez veya yeniden yazmaz. Cok gunluk gorunumde eksen tarihi
+gosterir. Proses-state bantlari secili pencereye kirpilir; `START`/`STOP` gibi
+bir etiket kendi bandina sigmiyorsa ust uste binmemesi icin gizlenir. Grafik
+basligi gorunen kayit sayisini ve canli kosuda o anda izlenen dosyayi gosterir.
 
 Ilgili endpointler:
 

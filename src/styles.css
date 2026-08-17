@@ -844,6 +844,14 @@ h2 {
   background: color-mix(in srgb, var(--border) 86%, #58636d);
 }
 
+.segmented-control.range-control {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.range-control button {
+  min-width: 62px;
+}
+
 .segmented-control button {
   min-height: var(--control-height);
   border: 0;

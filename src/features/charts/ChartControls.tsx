@@ -5,7 +5,7 @@ import type { ChannelGroup } from "../../channelConfig";
 import { channelLabel, getChannelConfig, sortChannels } from "../../channelConfig";
 import { ChartState } from "../../components/StatusViews";
 import type { AppCopy, Locale } from "../../i18n";
-import type { ChartLayout, ThemeMode } from "../../types";
+import type { ChartLayout, ChartTimeRange, ThemeMode } from "../../types";
 
 const CHART_GROUPS: Array<{
   group: ChannelGroup;
@@ -49,17 +49,54 @@ export function UnitNote({
   );
 }
 
-export function ChartModeControl({
+export function ChartViewControls({
   chartLayout,
+  chartTimeRange,
   copy,
   onChartLayoutChange,
+  onChartTimeRangeChange,
 }: {
   chartLayout: ChartLayout;
+  chartTimeRange: ChartTimeRange;
   copy: AppCopy["chart"];
   onChartLayoutChange: (layout: ChartLayout) => void;
+  onChartTimeRangeChange: (range: ChartTimeRange) => void;
 }) {
   return (
     <div className="chart-toolbar">
+      <div className="toolbar-cluster">
+        <span>{copy.rangeLabel}</span>
+        <div
+          className="segmented-control range-control"
+          role="group"
+          aria-label={copy.rangeAria}
+        >
+          <button
+            aria-pressed={chartTimeRange === "24h"}
+            className={chartTimeRange === "24h" ? "active" : ""}
+            onClick={() => onChartTimeRangeChange("24h")}
+            type="button"
+          >
+            {copy.last24Hours}
+          </button>
+          <button
+            aria-pressed={chartTimeRange === "7d"}
+            className={chartTimeRange === "7d" ? "active" : ""}
+            onClick={() => onChartTimeRangeChange("7d")}
+            type="button"
+          >
+            {copy.last7Days}
+          </button>
+          <button
+            aria-pressed={chartTimeRange === "all"}
+            className={chartTimeRange === "all" ? "active" : ""}
+            onClick={() => onChartTimeRangeChange("all")}
+            type="button"
+          >
+            {copy.allTime}
+          </button>
+        </div>
+      </div>
       <div className="toolbar-cluster">
         <span>{copy.modeLabel}</span>
         <div className="segmented-control" role="group" aria-label={copy.modeAria}>

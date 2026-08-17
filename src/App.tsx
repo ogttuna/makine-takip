@@ -15,7 +15,7 @@ import { ChartState } from "./components/StatusViews";
 import { AnalysisSummary } from "./features/analysis/AnalysisSummary";
 import {
   ChartArea,
-  ChartModeControl,
+  ChartViewControls,
   ChannelControls,
   UnitNote,
 } from "./features/charts/ChartControls";
@@ -30,9 +30,14 @@ import { RunActions } from "./features/runs/RunActions";
 import { RunList } from "./features/runs/RunList";
 import { CsvTailPanel } from "./features/source/CsvTailPanel";
 import { DEFAULT_LOCALE, getCopy, type Locale } from "./i18n";
+import {
+  samplesForChartRange,
+  segmentsForVisibleSamples,
+} from "./chartTimeRange";
 import { lastSourceSequence, mergeIncrementalSamples } from "./incrementalSamples";
 import {
   type ChartLayout,
+  type ChartTimeRange,
   type InspectorTab,
   type QualityFilter,
   type ThemeMode,
@@ -48,6 +53,7 @@ export function App() {
   const queryClient = useQueryClient();
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
   const [chartLayout, setChartLayout] = useState<ChartLayout>("overlay");
+  const [chartTimeRange, setChartTimeRange] = useState<ChartTimeRange>("24h");
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => initialThemeMode());
   const [locale, setLocale] = useState<Locale>(() => initialLocale());
   const [visibleChannels, setVisibleChannels] = useState<string[]>([]);
@@ -144,6 +150,19 @@ export function App() {
   const samples = samplesQuery.data ?? [];
   const qualityEvents = qualityEventsQuery.data ?? [];
   const analysis = analysisQuery.data ?? null;
+  const chartSamples = useMemo(
+    () => samplesForChartRange(samples, chartTimeRange),
+    [chartTimeRange, samples],
+  );
+  const chartProcessSegments = useMemo(
+    () =>
+      segmentsForVisibleSamples(
+        analysis?.segments ?? [],
+        chartSamples,
+        chartTimeRange,
+      ),
+    [analysis?.segments, chartSamples, chartTimeRange],
+  );
   const copy = getCopy(locale);
   const rawChannelCodes = useMemo(() => getRawChannelCodes(samples), [samples]);
   const channelCodes = useMemo(
@@ -497,7 +516,10 @@ export function App() {
               {samples.length > 0 ? (
                 <div className="chart-context" aria-live="polite">
                   <span>
-                    {copy.chart.visibleSamples(samples.length, selectedRun?.row_count ?? samples.length)}
+                    {copy.chart.visibleSamples(
+                      chartSamples.length,
+                      selectedRun?.row_count ?? samples.length,
+                    )}
                   </span>
                   {selectedRunId === browserTail.state.activeRunId &&
                   browserTail.state.activeFileName ? (
@@ -508,10 +530,12 @@ export function App() {
                 </div>
               ) : null}
             </div>
-            <ChartModeControl
+            <ChartViewControls
               chartLayout={chartLayout}
+              chartTimeRange={chartTimeRange}
               copy={copy.chart}
               onChartLayoutChange={setChartLayout}
+              onChartTimeRangeChange={setChartTimeRange}
             />
           </div>
 
@@ -558,8 +582,8 @@ export function App() {
               layout={chartLayout}
               locale={locale}
               qualityEvents={qualityEvents}
-              processSegments={analysis?.segments ?? []}
-              samples={samples}
+              processSegments={chartProcessSegments}
+              samples={chartSamples}
               themeMode={themeMode}
               visibleChannels={activeVisibleChannels}
             />
