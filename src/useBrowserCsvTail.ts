@@ -15,7 +15,9 @@ import {
   setBrowserTailEnabled,
 } from "./browserTailStorage";
 import { completeLinePrefixLength, decodeCsvRows } from "./csvByteHandling";
+import { prepareCsvFilesForScan } from "./csvHeaderPreflight";
 import {
+  filesBeforeUnavailableDailyLog,
   isDownloadDuplicateCsvName,
   logFileDateKey,
   scanStartIndex,
@@ -24,7 +26,6 @@ import {
 
 const SCAN_INTERVAL_MS = 30_000;
 const MAX_CHUNK_BYTES = 512 * 1024;
-const MAX_HEADER_BYTES = 64 * 1024;
 
 export type BrowserCsvTailRuntimeStatus =
   | "stopped"
@@ -57,11 +58,6 @@ type BrowserCsvTailOptions = {
 type CsvFileIssue = {
   fileName: string;
   message: string;
-};
-
-type PreparedCsvFile = {
-  file: File;
-  header: { line: string; endOffset: number };
 };
 
 export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
@@ -135,9 +131,13 @@ export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
       }
 
       const listing = await csvFiles(directory);
-      const files = listing.files;
       const fileIssues = [...listing.issues];
       let serverStatus = await fetchBrowserTailStatus(sourceIdRef.current);
+      const files = filesBeforeUnavailableDailyLog(
+        listing.files,
+        listing.issues.map((issue) => issue.fileName),
+        serverStatus?.active_file_name ?? null,
+      );
       let insertedCount = 0;
       let rejectedCount = 0;
 
@@ -158,14 +158,12 @@ export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
       }
 
       const startIndex = scanStartIndex(files, serverStatus);
-      const preparedFiles: PreparedCsvFile[] = [];
-      for (const file of files.slice(startIndex)) {
-        try {
-          preparedFiles.push({ file, header: await readHeader(file) });
-        } catch (error) {
-          fileIssues.push({ fileName: file.name, message: errorMessage(error) });
-        }
-      }
+      const prepared = await prepareCsvFilesForScan(
+        files.slice(startIndex),
+        (fileName) => logFileDateKey(fileName) !== null,
+      );
+      const preparedFiles = prepared.files;
+      fileIssues.push(...prepared.issues);
 
       for (let index = 0; index < preparedFiles.length; index += 1) {
         const { file, header } = preparedFiles[index];
@@ -466,37 +464,6 @@ async function csvFiles(
   }
 
   return { files: sortCsvFiles(files), issues };
-}
-
-async function readHeader(file: File): Promise<{ line: string; endOffset: number }> {
-  const bytes = new Uint8Array(await file.slice(0, MAX_HEADER_BYTES).arrayBuffer());
-  const newlineIndex = bytes.indexOf(10);
-  if (newlineIndex < 0) {
-    throw new Error(`${file.name}: tamamlanmış CSV başlığı bulunamadı.`);
-  }
-
-  let headerBytes = bytes.slice(0, newlineIndex);
-  if (headerBytes.at(-1) === 13) {
-    headerBytes = headerBytes.slice(0, -1);
-  }
-  const line = new TextDecoder("utf-8", { fatal: true })
-    .decode(headerBytes)
-    .replace(/^\uFEFF/, "")
-    .trim();
-  const columns = line
-    .split(";")
-    .map((column) => column.trim().replace(/^"(.*)"$/, "$1").toLocaleUpperCase("tr-TR"));
-  const hasFullTimestamp = columns.includes("TARİH SAAT") || columns.includes("TARIH SAAT");
-  const hasTimeOnly = columns.includes("SAAT");
-
-  if (hasFullTimestamp === hasTimeOnly) {
-    throw new Error(`${file.name}: TARIH SAAT veya SAAT kolonlarından yalnız biri bulunmalı.`);
-  }
-  if (hasTimeOnly && logFileDateKey(file.name) === null) {
-    throw new Error(`${file.name}: SAAT kolonu için dosya adı LogFile_YYYY_MM_DD.csv olmalı.`);
-  }
-
-  return { line, endOffset: newlineIndex + 1 };
 }
 
 async function syncFile(

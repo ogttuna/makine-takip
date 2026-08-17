@@ -285,6 +285,29 @@ function qualityEventView(
     };
   }
 
+  if (event.event_type === "csv_file_header_error") {
+    return {
+      title: copy.invalidFileTitle,
+      location: stringFromMetadata(metadata, "source_file_name") ?? location,
+      meta: time,
+      detail: copy.invalidFileDetail,
+    };
+  }
+
+  if (event.event_type === "timestamp_out_of_order") {
+    const gapSeconds = qualityGapSeconds(event, metadata);
+
+    return {
+      title: copy.outOfOrderTitle,
+      location,
+      meta: time,
+      detail:
+        gapSeconds !== null
+          ? copy.outOfOrderDetail(formatSeconds(Math.abs(gapSeconds), locale))
+          : cleanQualityMessage(event.message),
+    };
+  }
+
   if (event.event_type.startsWith("csv_row_")) {
     return {
       title: copy.invalidRowTitle,

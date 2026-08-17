@@ -313,6 +313,132 @@ async fn restart_keeps_checkpoint_and_rotates_without_duplicates() {
 }
 
 #[tokio::test]
+async fn reconfiguring_the_same_directory_preserves_the_run_and_all_checkpoints() {
+    let root = tempfile::tempdir().unwrap();
+    let source_dir = root.path().join("source");
+    fs::create_dir(&source_dir).unwrap();
+    fs::write(
+        source_dir.join("LogFile_2026_07_14.csv"),
+        format!("{HEADER}2026-07-14-23:57:00.000;10.0;0.4\n"),
+    )
+    .unwrap();
+    let newest_file = source_dir.join("LogFile_2026_07_15.csv");
+    fs::write(
+        &newest_file,
+        format!("{HEADER}2026-07-15-00:00:00.000;11.0;0.3\n"),
+    )
+    .unwrap();
+
+    let pool = create_test_pool(root.path()).await;
+    let manager = configure_manager(&pool, &source_dir).await;
+    let initial_status = manager.scan_once().await.unwrap();
+    let run_id = initial_status.active_run_id.unwrap();
+    assert_eq!(frame_count(&pool, run_id).await, 2);
+
+    manager
+        .configure(CsvTailConfigRequest {
+            name: Some("Renamed test source".to_string()),
+            directory_path: source_dir.to_string_lossy().to_string(),
+            file_pattern: Some("*.csv".to_string()),
+            scan_interval_ms: Some(2_000),
+        })
+        .await
+        .unwrap();
+    let resumed_status = manager.scan_once().await.unwrap();
+
+    assert_eq!(resumed_status.active_run_id, Some(run_id));
+    assert_eq!(frame_count(&pool, run_id).await, 2);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM csv_tail_checkpoints")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM runs")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+
+    append(&newest_file, "2026-07-15-00:03:00.000;12.0;0.2\n");
+    manager.scan_once().await.unwrap();
+    assert_eq!(frame_count(&pool, run_id).await, 3);
+}
+
+#[tokio::test]
+async fn changing_directory_completes_the_old_run_and_discards_stale_checkpoints() {
+    let root = tempfile::tempdir().unwrap();
+    let first_source = root.path().join("first-source");
+    let second_source = root.path().join("second-source");
+    fs::create_dir(&first_source).unwrap();
+    fs::create_dir(&second_source).unwrap();
+    fs::write(
+        first_source.join("LogFile_2026_07_14.csv"),
+        format!("{HEADER}2026-07-14-10:00:00.000;10.0;0.4\n"),
+    )
+    .unwrap();
+    fs::write(
+        second_source.join("LogFile_2026_07_14.csv"),
+        format!("{HEADER}2026-07-14-11:00:00.000;20.0;0.3\n"),
+    )
+    .unwrap();
+
+    let pool = create_test_pool(root.path()).await;
+    let manager = configure_manager(&pool, &first_source).await;
+    let first_run_id = manager.scan_once().await.unwrap().active_run_id.unwrap();
+
+    manager
+        .configure(CsvTailConfigRequest {
+            name: Some("Second source".to_string()),
+            directory_path: second_source.to_string_lossy().to_string(),
+            file_pattern: Some("*.csv".to_string()),
+            scan_interval_ms: Some(1_000),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(run_status(&pool, first_run_id).await, "completed");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM csv_tail_checkpoints")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+
+    let second_status = manager.scan_once().await.unwrap();
+    let second_run_id = second_status.active_run_id.unwrap();
+    let raf_value: f64 = sqlx::query_scalar(
+        r#"
+        SELECT m.numeric_value
+        FROM measurements m
+        JOIN sample_frames f ON f.id = m.frame_id
+        JOIN channels c ON c.id = m.channel_id
+        WHERE f.run_id = ?1 AND c.code = 'RAF1'
+        "#,
+    )
+    .bind(second_run_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_ne!(second_run_id, first_run_id);
+    assert_eq!(frame_count(&pool, first_run_id).await, 1);
+    assert_eq!(frame_count(&pool, second_run_id).await, 1);
+    assert_eq!(raf_value, 20.0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM runs")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn orders_logfile_dates_even_when_copy_times_are_reversed() {
     let root = tempfile::tempdir().unwrap();
     let source_dir = root.path().join("source");
@@ -410,6 +536,153 @@ async fn does_not_skip_a_headerless_middle_file_when_a_newer_file_is_ready() {
         ]
     );
     assert_eq!(run_status(&pool, run_id).await, "running");
+}
+
+#[tokio::test]
+async fn skips_a_complete_invalid_header_and_continues_with_the_next_daily_file() {
+    let root = tempfile::tempdir().unwrap();
+    let source_dir = root.path().join("source");
+    fs::create_dir(&source_dir).unwrap();
+    fs::write(
+        source_dir.join("LogFile_2026_07_14.csv"),
+        format!("{HEADER}2026-07-14-23:57:00.000;10.0;0.4\n"),
+    )
+    .unwrap();
+
+    let pool = create_test_pool(root.path()).await;
+    let manager = configure_manager(&pool, &source_dir).await;
+    let first_status = manager.scan_once().await.unwrap();
+    let run_id = first_status.active_run_id.unwrap();
+
+    fs::write(
+        source_dir.join("LogFile_2026_07_15.csv"),
+        "WRONG;RAF1;VACUM\n00:00;11.0;0.3\n",
+    )
+    .unwrap();
+    fs::write(
+        source_dir.join("LogFile_2026_07_16.csv"),
+        format!("{HEADER}2026-07-16-00:00:00.000;12.0;0.2\n"),
+    )
+    .unwrap();
+
+    let status = manager.scan_once().await.unwrap();
+    let file_error_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM quality_events WHERE run_id = ?1 AND event_type = 'csv_file_header_error'",
+    )
+    .bind(run_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(frame_count(&pool, run_id).await, 2);
+    assert_eq!(file_error_count, 1);
+    assert!(status.last_error.is_none());
+    assert!(
+        status
+            .active_file_path
+            .as_deref()
+            .unwrap()
+            .ends_with("LogFile_2026_07_16.csv")
+    );
+
+    manager.scan_once().await.unwrap();
+    assert_eq!(frame_count(&pool, run_id).await, 2);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM quality_events WHERE run_id = ?1 AND event_type = 'csv_file_header_error'",
+        )
+        .bind(run_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn skips_an_invalid_historical_header_during_initial_backfill() {
+    let root = tempfile::tempdir().unwrap();
+    let source_dir = root.path().join("source");
+    fs::create_dir(&source_dir).unwrap();
+    fs::write(
+        source_dir.join("LogFile_2026_07_14.csv"),
+        "WRONG;RAF1;VACUM\n00:00;10.0;0.4\n",
+    )
+    .unwrap();
+    fs::write(
+        source_dir.join("LogFile_2026_07_15.csv"),
+        format!("{HEADER}2026-07-15-00:00:00.000;12.0;0.2\n"),
+    )
+    .unwrap();
+
+    let pool = create_test_pool(root.path()).await;
+    let manager = configure_manager(&pool, &source_dir).await;
+    let status = manager.scan_once().await.unwrap();
+    let run_id = status.active_run_id.unwrap();
+    let file_error_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM quality_events WHERE run_id = ?1 AND event_type = 'csv_file_header_error'",
+    )
+    .bind(run_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(frame_count(&pool, run_id).await, 1);
+    assert_eq!(file_error_count, 1);
+    assert!(
+        status
+            .active_file_path
+            .as_deref()
+            .unwrap()
+            .ends_with("LogFile_2026_07_15.csv")
+    );
+}
+
+#[tokio::test]
+async fn skips_an_oversized_latest_header_and_names_the_run_for_valid_data() {
+    let root = tempfile::tempdir().unwrap();
+    let source_dir = root.path().join("source");
+    fs::create_dir(&source_dir).unwrap();
+    fs::write(
+        source_dir.join("LogFile_2026_07_14.csv"),
+        format!("{HEADER}2026-07-14-23:57:00.000;10.0;0.4\n"),
+    )
+    .unwrap();
+    fs::write(
+        source_dir.join("LogFile_2026_07_15.csv"),
+        vec![b'X'; 64 * 1024 + 1],
+    )
+    .unwrap();
+
+    let pool = create_test_pool(root.path()).await;
+    let manager = configure_manager(&pool, &source_dir).await;
+    let status = manager.scan_once().await.unwrap();
+    let run_id = status.active_run_id.unwrap();
+    let run_name: String = sqlx::query_scalar("SELECT name FROM runs WHERE id = ?1")
+        .bind(run_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(frame_count(&pool, run_id).await, 1);
+    assert_eq!(run_name, "LogFile_2026_07_14.csv");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM quality_events WHERE run_id = ?1 AND event_type = 'csv_file_header_error'",
+        )
+        .bind(run_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert!(
+        status
+            .active_file_path
+            .as_deref()
+            .unwrap()
+            .ends_with("LogFile_2026_07_14.csv")
+    );
 }
 
 #[tokio::test]

@@ -54,6 +54,30 @@ export function scanStartIndex(
   return firstNewer >= 0 ? firstNewer : files.length;
 }
 
+export function filesBeforeUnavailableDailyLog<T extends CsvFileLike>(
+  files: T[],
+  unavailableFileNames: string[],
+  activeFileName: string | null,
+): T[] {
+  const activeDate = activeFileName ? logFileDateKey(activeFileName) : null;
+  const barrierDates = unavailableFileNames
+    .map(logFileDateKey)
+    .filter(
+      (dateKey): dateKey is number =>
+        dateKey !== null && (activeDate === null || dateKey >= activeDate),
+    );
+
+  if (barrierDates.length === 0) {
+    return files;
+  }
+
+  const firstUnavailableDate = Math.min(...barrierDates);
+  return files.filter((file) => {
+    const dateKey = logFileDateKey(file.name);
+    return dateKey !== null && dateKey < firstUnavailableDate;
+  });
+}
+
 export function isDownloadDuplicateCsvName(fileName: string): boolean {
   return /^LogFile_\d{4}_\d{2}_\d{2}\s+\(\d+\)\.csv$/i.test(fileName);
 }

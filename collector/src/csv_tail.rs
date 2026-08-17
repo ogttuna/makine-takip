@@ -23,6 +23,7 @@ const SOURCE_ID: i64 = 1;
 const DEFAULT_NAME: &str = "Freeze dryer CSV";
 const DEFAULT_PATTERN: &str = "*.csv";
 const DEFAULT_SCAN_INTERVAL_MS: i64 = 30_000;
+const MAX_HEADER_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Deserialize)]
 pub struct CsvTailConfigRequest {
@@ -148,42 +149,91 @@ impl CsvTailManager {
 
         let directory = canonical_directory(&request.directory_path)?;
         let directory_path = directory.to_string_lossy().to_string();
+        let existing_source = load_source(&self.inner.pool).await?;
+        let same_source = existing_source.as_ref().is_some_and(|source| {
+            source.directory_path == directory_path && source.file_pattern == file_pattern
+        });
 
-        finish_active_run(&self.inner.pool).await?;
-        sqlx::query(
-            r#"
-            INSERT INTO csv_tail_sources (
-                id,
-                name,
-                directory_path,
-                file_pattern,
-                scan_interval_ms,
-                enabled,
-                active_file_path,
-                active_run_id,
-                last_error,
-                updated_at
+        if same_source {
+            sqlx::query(
+                r#"
+                UPDATE csv_tail_sources
+                SET
+                    name = ?2,
+                    scan_interval_ms = ?3,
+                    enabled = 0,
+                    last_error = NULL,
+                    updated_at = ?4
+                WHERE id = ?1
+                "#,
             )
-            VALUES (1, ?1, ?2, ?3, ?4, 0, NULL, NULL, NULL, ?5)
-            ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                directory_path = excluded.directory_path,
-                file_pattern = excluded.file_pattern,
-                scan_interval_ms = excluded.scan_interval_ms,
-                enabled = 0,
-                active_file_path = NULL,
-                active_run_id = NULL,
-                last_error = NULL,
-                updated_at = excluded.updated_at
-            "#,
-        )
-        .bind(name)
-        .bind(directory_path)
-        .bind(file_pattern)
-        .bind(scan_interval_ms)
-        .bind(now())
-        .execute(&self.inner.pool)
-        .await?;
+            .bind(SOURCE_ID)
+            .bind(name)
+            .bind(scan_interval_ms)
+            .bind(now())
+            .execute(&self.inner.pool)
+            .await?;
+        } else {
+            let mut tx = self.inner.pool.begin().await?;
+
+            if let Some(run_id) = existing_source.and_then(|source| source.active_run_id) {
+                sqlx::query(
+                    r#"
+                    UPDATE runs
+                    SET
+                        status = 'completed',
+                        finished_at = COALESCE(
+                            finished_at,
+                            (SELECT MAX(sampled_at) FROM sample_frames WHERE run_id = ?1)
+                        )
+                    WHERE id = ?1 AND status = 'running'
+                    "#,
+                )
+                .bind(run_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+
+            sqlx::query("DELETE FROM csv_tail_checkpoints WHERE source_id = ?1")
+                .bind(SOURCE_ID)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(
+                r#"
+                INSERT INTO csv_tail_sources (
+                    id,
+                    name,
+                    directory_path,
+                    file_pattern,
+                    scan_interval_ms,
+                    enabled,
+                    active_file_path,
+                    active_run_id,
+                    last_error,
+                    updated_at
+                )
+                VALUES (1, ?1, ?2, ?3, ?4, 0, NULL, NULL, NULL, ?5)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    directory_path = excluded.directory_path,
+                    file_pattern = excluded.file_pattern,
+                    scan_interval_ms = excluded.scan_interval_ms,
+                    enabled = 0,
+                    active_file_path = NULL,
+                    active_run_id = NULL,
+                    last_error = NULL,
+                    updated_at = excluded.updated_at
+                "#,
+            )
+            .bind(name)
+            .bind(directory_path)
+            .bind(file_pattern)
+            .bind(scan_interval_ms)
+            .bind(now())
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+        }
 
         self.set_runtime_status("stopped").await;
         self.status().await
@@ -388,6 +438,9 @@ impl CsvTailManager {
         };
 
         if let Some(active_path) = source.active_file_path.as_deref() {
+            let run_id = source
+                .active_run_id
+                .ok_or_else(|| anyhow!("active CSV tail file has no active run"))?;
             let pending_files = files
                 .iter()
                 .position(|file| file.path == active_path)
@@ -400,8 +453,19 @@ impl CsvTailManager {
                 let mut rotated = false;
 
                 for file in pending_files {
-                    if read_header(Path::new(&file.path))?.is_none() {
-                        break;
+                    match inspect_header(Path::new(&file.path))? {
+                        CsvHeaderInspection::Ready { .. } => {}
+                        CsvHeaderInspection::Incomplete => break,
+                        CsvHeaderInspection::Invalid(error) => {
+                            let issue = CsvFileIssue::new(&file.path, &error);
+                            record_csv_file_issues(
+                                &self.inner.pool,
+                                run_id,
+                                std::slice::from_ref(&issue),
+                            )
+                            .await?;
+                            continue;
+                        }
                     }
 
                     let current_source = load_source(&self.inner.pool)
@@ -420,14 +484,30 @@ impl CsvTailManager {
             return Ok(());
         }
 
-        if load_checkpoint(&self.inner.pool, &newest.path)
+        let mut ready_files = Vec::new();
+        let mut file_issues = Vec::new();
+
+        for file in &files {
+            match inspect_header(Path::new(&file.path))? {
+                CsvHeaderInspection::Ready { .. } => ready_files.push(file),
+                CsvHeaderInspection::Incomplete => break,
+                CsvHeaderInspection::Invalid(error) => {
+                    file_issues.push(CsvFileIssue::new(&file.path, &error));
+                }
+            }
+        }
+
+        let Some(newest_ready) = ready_files.last().copied() else {
+            if let Some(issue) = file_issues.first() {
+                bail!(issue.message.clone());
+            }
+            return Ok(());
+        };
+
+        if load_checkpoint(&self.inner.pool, &newest_ready.path)
             .await?
             .is_some_and(|checkpoint| checkpoint.completed == 1)
         {
-            return Ok(());
-        }
-
-        if read_header(Path::new(&newest.path))?.is_none() {
             return Ok(());
         }
 
@@ -437,7 +517,7 @@ impl CsvTailManager {
                 let run_id = create_run(
                     &self.inner.pool,
                     CreateRunRequest {
-                        name: file_name(&newest.path)?,
+                        name: file_name(&newest_ready.path)?,
                         source_kind: "csv_tail".to_string(),
                         source_name: Some(source.directory_path.clone()),
                         started_at: None,
@@ -461,13 +541,15 @@ impl CsvTailManager {
             }
         };
 
-        for file in files.iter().take(files.len().saturating_sub(1)) {
+        record_csv_file_issues(&self.inner.pool, run_id, &file_issues).await?;
+
+        for file in ready_files.iter().take(ready_files.len().saturating_sub(1)) {
             self.backfill_file(source.id, run_id, &file.path)
                 .await
                 .with_context(|| format!("historical CSV backfill failed for `{}`", file.path))?;
         }
 
-        self.start_file(source.id, &newest.path, Some(run_id))
+        self.start_file(source.id, &newest_ready.path, Some(run_id))
             .await?;
         self.set_runtime_status("tailing").await;
 
@@ -909,45 +991,82 @@ async fn update_checkpoint_size(
     Ok(())
 }
 
-async fn finish_active_run(pool: &SqlitePool) -> anyhow::Result<()> {
-    let run_id = sqlx::query_scalar::<_, Option<i64>>(
-        "SELECT active_run_id FROM csv_tail_sources WHERE id = 1",
-    )
-    .fetch_optional(pool)
-    .await?
-    .flatten();
-
-    if let Some(run_id) = run_id {
-        complete_run(pool, run_id).await?;
-    }
-
-    Ok(())
-}
-
-async fn complete_run(pool: &SqlitePool, run_id: i64) -> anyhow::Result<()> {
-    sqlx::query(
-        r#"
-        UPDATE runs
-        SET
-            status = 'completed',
-            finished_at = COALESCE(
-                finished_at,
-                (SELECT MAX(sampled_at) FROM sample_frames WHERE run_id = ?1)
-            )
-        WHERE id = ?1 AND status = 'running'
-        "#,
-    )
-    .bind(run_id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
 #[derive(Debug)]
 struct FileCandidate {
     path: String,
     modified: SystemTime,
     log_date: Option<NaiveDate>,
+}
+
+#[derive(Debug)]
+struct CsvFileIssue {
+    file_name: String,
+    path: String,
+    message: String,
+}
+
+impl CsvFileIssue {
+    fn new(path: &str, error: &anyhow::Error) -> Self {
+        Self {
+            file_name: file_name(path).unwrap_or_else(|_| path.to_string()),
+            path: path.to_string(),
+            message: format!("{error:#}"),
+        }
+    }
+}
+
+async fn record_csv_file_issues(
+    pool: &SqlitePool,
+    run_id: i64,
+    issues: &[CsvFileIssue],
+) -> anyhow::Result<()> {
+    for issue in issues {
+        let metadata_json = serde_json::json!({
+            "source_file_name": issue.file_name,
+            "source_file_path": issue.path,
+            "reason": issue.message,
+        })
+        .to_string();
+        let result = sqlx::query(
+            r#"
+            INSERT INTO quality_events (
+                run_id,
+                frame_id,
+                channel_id,
+                event_type,
+                severity,
+                message,
+                metadata_json
+            )
+            SELECT ?1, NULL, NULL, 'csv_file_header_error', 'error', ?2, ?3
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM quality_events
+                WHERE run_id = ?1
+                  AND event_type = 'csv_file_header_error'
+                  AND metadata_json = ?3
+            )
+            "#,
+        )
+        .bind(run_id)
+        .bind(format!(
+            "CSV `{}` was skipped so valid files could continue: {}",
+            issue.file_name, issue.message
+        ))
+        .bind(metadata_json)
+        .execute(pool)
+        .await?;
+
+        if result.rows_affected() > 0 {
+            tracing::warn!(
+                file_name = %issue.file_name,
+                error = %issue.message,
+                "skipped unreadable CSV while continuing with valid files"
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn discover_files(directory_path: &str, pattern: &str) -> anyhow::Result<Vec<FileCandidate>> {
@@ -970,7 +1089,7 @@ fn discover_files(directory_path: &str, pattern: &str) -> anyhow::Result<Vec<Fil
         }
 
         if is_download_duplicate_name(&file_name) {
-            tracing::warn!(%file_name, "skipping browser/download duplicate CSV name");
+            tracing::debug!(%file_name, "skipping browser/download duplicate CSV name");
             continue;
         }
 
@@ -1056,11 +1175,29 @@ fn canonical_directory(value: &str) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
-fn read_header(path: &Path) -> anyhow::Result<Option<(String, usize)>> {
-    let bytes = fs::read(path)
+#[derive(Debug)]
+enum CsvHeaderInspection {
+    Ready { line: String, end_offset: usize },
+    Incomplete,
+    Invalid(anyhow::Error),
+}
+
+fn inspect_header(path: &Path) -> anyhow::Result<CsvHeaderInspection> {
+    let mut file = File::open(path)
+        .with_context(|| format!("failed to open CSV header from `{}`", path.display()))?;
+    let mut bytes = Vec::with_capacity(MAX_HEADER_BYTES + 1);
+    file.by_ref()
+        .take((MAX_HEADER_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
         .with_context(|| format!("failed to read CSV header from `{}`", path.display()))?;
     let Some(newline_index) = bytes.iter().position(|byte| *byte == b'\n') else {
-        return Ok(None);
+        if bytes.len() > MAX_HEADER_BYTES {
+            return Ok(CsvHeaderInspection::Invalid(anyhow!(
+                "CSV header exceeds the {MAX_HEADER_BYTES}-byte safety limit"
+            )));
+        }
+
+        return Ok(CsvHeaderInspection::Incomplete);
     };
     let mut header_bytes = &bytes[..newline_index];
 
@@ -1072,15 +1209,30 @@ fn read_header(path: &Path) -> anyhow::Result<Option<(String, usize)>> {
         header_bytes = &header_bytes[3..];
     }
 
-    let header = std::str::from_utf8(header_bytes)
-        .context("CSV header must be UTF-8")?
-        .trim()
-        .to_string();
+    let header = match std::str::from_utf8(header_bytes).context("CSV header must be UTF-8") {
+        Ok(header) => header.trim().to_string(),
+        Err(error) => return Ok(CsvHeaderInspection::Invalid(error)),
+    };
     let source_file_name = file_name(&path.to_string_lossy())?;
-    let header = validate_csv_header(&source_file_name, &header)
-        .with_context(|| format!("CSV `{}` has an invalid header", path.display()))?;
+    let header = match validate_csv_header(&source_file_name, &header)
+        .with_context(|| format!("CSV `{}` has an invalid header", path.display()))
+    {
+        Ok(header) => header,
+        Err(error) => return Ok(CsvHeaderInspection::Invalid(error)),
+    };
 
-    Ok(Some((header, newline_index + 1)))
+    Ok(CsvHeaderInspection::Ready {
+        line: header,
+        end_offset: newline_index + 1,
+    })
+}
+
+fn read_header(path: &Path) -> anyhow::Result<Option<(String, usize)>> {
+    match inspect_header(path)? {
+        CsvHeaderInspection::Ready { line, end_offset } => Ok(Some((line, end_offset))),
+        CsvHeaderInspection::Incomplete => Ok(None),
+        CsvHeaderInspection::Invalid(error) => Err(error),
+    }
 }
 
 fn read_new_bytes(path: &Path, offset: u64) -> anyhow::Result<Vec<u8>> {
@@ -1126,7 +1278,11 @@ fn now() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::is_download_duplicate_name;
+    use std::fs;
+
+    use super::{
+        CsvHeaderInspection, MAX_HEADER_BYTES, inspect_header, is_download_duplicate_name,
+    };
 
     #[test]
     fn recognizes_download_copy_names_without_hiding_canonical_logs() {
@@ -1134,5 +1290,26 @@ mod tests {
         assert!(is_download_duplicate_name("LogFile_2026_08_14 (23).CSV"));
         assert!(!is_download_duplicate_name("LogFile_2026_08_14.csv"));
         assert!(!is_download_duplicate_name("other (1).csv"));
+    }
+
+    #[test]
+    fn distinguishes_incomplete_invalid_and_unreadable_headers() {
+        let root = tempfile::tempdir().unwrap();
+        let partial = root.path().join("LogFile_2026_08_14.csv");
+        fs::write(&partial, "SAAT;RAF1").unwrap();
+        assert!(matches!(
+            inspect_header(&partial).unwrap(),
+            CsvHeaderInspection::Incomplete
+        ));
+
+        let oversized = root.path().join("LogFile_2026_08_15.csv");
+        fs::write(&oversized, vec![b'X'; MAX_HEADER_BYTES + 1]).unwrap();
+        assert!(matches!(
+            inspect_header(&oversized).unwrap(),
+            CsvHeaderInspection::Invalid(_)
+        ));
+
+        let missing = root.path().join("LogFile_2026_08_16.csv");
+        assert!(inspect_header(&missing).is_err());
     }
 }

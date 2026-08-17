@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  filesBeforeUnavailableDailyLog,
   isDownloadDuplicateCsvName,
   logFileDateKey,
   scanStartIndex,
@@ -82,5 +83,37 @@ test("recovers from an obsolete malformed active filename using valid daily chec
       last_modified_ms: 999,
     }),
     0,
+  );
+});
+
+test("does not advance past a temporarily unreadable daily file", () => {
+  const files = sortCsvFiles([
+    { name: "LogFile_2026_09_01.csv", lastModified: 1 },
+    { name: "LogFile_2026_09_03.csv", lastModified: 3 },
+  ]);
+
+  assert.deepEqual(
+    filesBeforeUnavailableDailyLog(
+      files,
+      ["LogFile_2026_09_02.csv"],
+      "LogFile_2026_09_01.csv",
+    ).map((file) => file.name),
+    ["LogFile_2026_09_01.csv"],
+  );
+});
+
+test("an unavailable old file does not freeze an already newer checkpoint", () => {
+  const files = sortCsvFiles([
+    { name: "LogFile_2026_09_02.csv", lastModified: 2 },
+    { name: "LogFile_2026_09_03.csv", lastModified: 3 },
+  ]);
+
+  assert.deepEqual(
+    filesBeforeUnavailableDailyLog(
+      files,
+      ["LogFile_2026_09_01.csv"],
+      "LogFile_2026_09_03.csv",
+    ).map((file) => file.name),
+    ["LogFile_2026_09_02.csv", "LogFile_2026_09_03.csv"],
   );
 });

@@ -183,7 +183,11 @@ Klasor secildikten sonra sistem:
 - byte ve source-sequence checkpoint'ini sunucudaki SQLite'ta saklar,
 - yeni gunluk CSV gecerli bir header ile olustugunda ayni run'i koruyarak yeni
   dosyaya otomatik gecer,
+- yeni dosyanin header satiri henuz tamamlanmadiysa onu atlayip veri kaybetmek
+  yerine tamamlanmasini bekler; tamamlanmis fakat gecersiz header'li dosyayi
+  kalite hatasi olarak kaydedip sonraki gecerli dosyaya devam eder,
 - ayni satir tekrar taransa bile source sequence ile ikinci kez yazmaz,
+- ayni klasor yeniden yapilandirildiginda mevcut run ve checkpoint'leri korur,
 - yeni sample sorgularinda son sequence'ten sonrasini alir; yeni satir yoksa
   grafige eski noktayi yeniden eklemez,
 - 30 saniyelik tarama/polling araligini yalnizca goruntuleme gecikmesi olarak
@@ -213,9 +217,15 @@ CSV hatalari satir/hücre seviyesinde izole edilir:
   gecersiz olarak isaretlenirken checkpoint kaynak dosyanin gercek byte
   konumuyla ilerler,
 - yarim yazilmis son satir tamamlanana kadar bekletilir,
-- header okunamiyorsa sema guvenle belirlenemeyecegi icin o dosya atlanip hata
-  olarak gosterilir; klasordeki diger gecerli dosyalar takip edilmeye devam
-  eder.
+- tamamlanmis header bozuksa veya 64 KiB guvenlik sinirini asiyorsa dosya
+  atlanip kalite hatasi olarak gosterilir; klasordeki diger gecerli dosyalar
+  takip edilmeye devam eder,
+- dosya gecici olarak okunamiyorsa (ornegin ag paylasimi kesintisi) sonraki
+  gunluk dosyaya gecilmez; erisim geri geldiginde ayni checkpoint'ten devam
+  edilir,
+- zaman onceki kayda gore geriye giderse satir kaybedilmez;
+  `timestamp_out_of_order` kalite kaydi olusur, run zaman araligi gercek
+  minimum/maksimuma genisler ve grafik kronolojik sirada kalir.
 
 Grafik zamani polling anindan degil CSV zamanindan gelir. Ornegin 10:00
 kaydindan sonra sonraki kayit 10:07 ise sistem noktayi tam 10:07'ye yazar;

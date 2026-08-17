@@ -171,7 +171,18 @@ pub async fn append_samples(
             let gap_seconds =
                 (prepared.sampled_at_value - previous).num_milliseconds() as f64 / 1_000.0;
 
-            if gap_seconds > TIME_GAP_WARNING_SECONDS {
+            if gap_seconds < 0.0 {
+                warning_count += 1;
+                insert_timestamp_out_of_order_event(
+                    &mut tx,
+                    run_id,
+                    frame_id,
+                    &prepared,
+                    previous,
+                    gap_seconds,
+                )
+                .await?;
+            } else if gap_seconds > TIME_GAP_WARNING_SECONDS {
                 warning_count += 1;
                 insert_time_gap_event(&mut tx, run_id, frame_id, &prepared, previous, gap_seconds)
                     .await?;
@@ -790,6 +801,47 @@ async fn insert_time_gap_event(
     Ok(())
 }
 
+async fn insert_timestamp_out_of_order_event(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    run_id: i64,
+    frame_id: i64,
+    sample: &PreparedSample,
+    previous: NaiveDateTime,
+    gap_seconds: f64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO quality_events (
+            run_id,
+            frame_id,
+            event_type,
+            severity,
+            message,
+            metadata_json
+        )
+        VALUES (?1, ?2, 'timestamp_out_of_order', 'warning', ?3, ?4)
+        "#,
+    )
+    .bind(run_id)
+    .bind(frame_id)
+    .bind(format!(
+        "timestamp moved backwards by {:.3} seconds before this sample",
+        gap_seconds.abs()
+    ))
+    .bind(
+        serde_json::json!({
+            "gap_seconds": gap_seconds,
+            "previous_timestamp": previous.format(DISPLAY_TIMESTAMP_FORMAT).to_string(),
+            "current_timestamp": sample.sampled_at,
+        })
+        .to_string(),
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
 async fn insert_parse_error_event(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     run_id: i64,
@@ -894,7 +946,10 @@ async fn update_run_bounds(
         r#"
         UPDATE runs
         SET
-            started_at = COALESCE(started_at, ?2),
+            started_at = CASE
+                WHEN started_at IS NULL OR ?2 < started_at THEN ?2
+                ELSE started_at
+            END,
             finished_at = ?3,
             status = CASE
                 WHEN status = 'imported' THEN 'running'

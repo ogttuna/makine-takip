@@ -138,6 +138,66 @@ async fn appends_auto_sequences_and_quality_events() {
 }
 
 #[tokio::test]
+async fn records_a_backward_timestamp_across_separate_ingest_batches() {
+    let pool = create_test_pool().await;
+    let run_id = create_network_run(&pool).await;
+
+    collector::ingest::append_samples(
+        &pool,
+        run_id,
+        AppendSamplesRequest {
+            samples: vec![sample("2026-06-24T10:10:00.000", 1, 10.0)],
+        },
+    )
+    .await
+    .unwrap();
+
+    let backward_report = collector::ingest::append_samples(
+        &pool,
+        run_id,
+        AppendSamplesRequest {
+            samples: vec![sample("2026-06-24T10:05:00.000", 2, 11.0)],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(backward_report.inserted_count, 1);
+    assert_eq!(backward_report.warning_count, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM quality_events WHERE run_id = ?1 AND event_type = 'timestamp_out_of_order'",
+        )
+        .bind(run_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+
+    collector::ingest::append_samples(
+        &pool,
+        run_id,
+        AppendSamplesRequest {
+            samples: vec![sample("2026-06-24T10:15:00.000", 3, 12.0)],
+        },
+    )
+    .await
+    .unwrap();
+
+    let bounds = sqlx::query("SELECT started_at, finished_at FROM runs WHERE id = ?1")
+        .bind(run_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let started_at: String = bounds.try_get("started_at").unwrap();
+    let finished_at: String = bounds.try_get("finished_at").unwrap();
+
+    assert_eq!(started_at, "2026-06-24T10:05:00.000");
+    assert_eq!(finished_at, "2026-06-24T10:15:00.000");
+}
+
+#[tokio::test]
 async fn stores_machine_state_observations_without_mapping_to_recipes() {
     let pool = create_test_pool().await;
     let run_id = create_network_run(&pool).await;
