@@ -16,6 +16,8 @@ const MAX_CHUNK_BYTES: usize = 1_000_000;
 #[derive(Debug, Deserialize)]
 pub struct BrowserTailOpenRequest {
     pub source_id: String,
+    #[serde(default)]
+    pub machine_id: Option<i64>,
     pub source_name: String,
     pub file_name: String,
     pub header_line: String,
@@ -36,6 +38,7 @@ pub struct BrowserTailChunkRequest {
 #[derive(Debug, Clone, Serialize)]
 pub struct BrowserTailStatus {
     pub source_id: String,
+    pub machine_id: Option<i64>,
     pub source_name: String,
     pub active_file_name: Option<String>,
     pub active_run_id: Option<i64>,
@@ -61,6 +64,7 @@ pub struct BrowserTailChunkResponse {
 #[derive(Debug, FromRow)]
 struct BrowserTailSourceRow {
     source_id: String,
+    machine_id: Option<i64>,
     name: String,
     active_file_name: Option<String>,
     active_run_id: Option<i64>,
@@ -84,6 +88,7 @@ pub async fn open_file(
     request: BrowserTailOpenRequest,
 ) -> anyhow::Result<BrowserTailStatus> {
     let source_id = valid_source_id(&request.source_id)?;
+    let machine_id = crate::fleet::resolve_machine_id(pool, request.machine_id).await?;
     let source_name = non_empty(&request.source_name, "source_name")?;
     let file_name = valid_file_name(&request.file_name)?;
     let header_line = valid_header(&file_name, &request.header_line)?;
@@ -101,17 +106,28 @@ pub async fn open_file(
     }
 
     let timestamp = now();
+    if let Some(existing_source) = load_source(pool, &source_id).await?
+        && existing_source
+            .machine_id
+            .is_some_and(|existing_machine_id| existing_machine_id != machine_id)
+    {
+        bail!("browser source is already assigned to another machine");
+    }
+
     sqlx::query(
         r#"
-        INSERT INTO browser_tail_sources (source_id, name, last_seen_at, updated_at)
-        VALUES (?1, ?2, ?3, ?3)
+        INSERT INTO browser_tail_sources (source_id, machine_id, name, last_seen_at, updated_at)
+        VALUES (?1, ?2, ?3, ?4, ?4)
         ON CONFLICT(source_id) DO UPDATE SET
             name = excluded.name,
+            machine_id = COALESCE(browser_tail_sources.machine_id, excluded.machine_id),
+            enabled = 1,
             last_seen_at = excluded.last_seen_at,
             updated_at = excluded.updated_at
         "#,
     )
     .bind(&source_id)
+    .bind(machine_id)
     .bind(&source_name)
     .bind(&timestamp)
     .execute(pool)
@@ -176,6 +192,7 @@ pub async fn open_file(
                 pool,
                 CreateRunRequest {
                     name: source_name.clone(),
+                    machine_id: Some(machine_id),
                     source_kind: "csv_tail".to_string(),
                     source_name: Some(source_name.clone()),
                     started_at: None,
@@ -361,6 +378,7 @@ pub async fn source_status(
         Some(file_name) => status_for_file(pool, &source_id, file_name).await,
         None => Ok(BrowserTailStatus {
             source_id: source.source_id,
+            machine_id: source.machine_id,
             source_name: source.name,
             active_file_name: None,
             active_run_id: None,
@@ -373,6 +391,94 @@ pub async fn source_status(
             last_seen_at: source.last_seen_at,
         }),
     }
+}
+
+pub async fn stop_source(
+    pool: &SqlitePool,
+    source_id: &str,
+    complete_run: bool,
+) -> anyhow::Result<Option<i64>> {
+    let source_id = valid_source_id(source_id)?;
+    let mut tx = pool.begin().await?;
+    let Some(source) = sqlx::query_as::<_, BrowserTailSourceRow>(
+        r#"
+        SELECT source_id, machine_id, name, active_file_name, active_run_id, last_seen_at
+        FROM browser_tail_sources
+        WHERE source_id = ?1
+        "#,
+    )
+    .bind(&source_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        tx.commit().await?;
+        return Ok(None);
+    };
+    let timestamp = now();
+
+    if complete_run {
+        if let Some(file_name) = source.active_file_name.as_deref() {
+            sqlx::query(
+                r#"
+                UPDATE browser_tail_files
+                SET completed = 1, updated_at = ?3
+                WHERE source_id = ?1 AND file_name = ?2
+                "#,
+            )
+            .bind(&source_id)
+            .bind(file_name)
+            .bind(&timestamp)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        if let Some(run_id) = source.active_run_id {
+            sqlx::query(
+                r#"
+                UPDATE runs
+                SET status = 'completed',
+                    finished_at = COALESCE(
+                        finished_at,
+                        (SELECT MAX(sampled_at) FROM sample_frames WHERE run_id = ?1),
+                        ?2
+                    )
+                WHERE id = ?1 AND status = 'running'
+                "#,
+            )
+            .bind(run_id)
+            .bind(&timestamp)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE browser_tail_sources
+            SET enabled = 0, active_file_name = NULL, active_run_id = NULL,
+                last_seen_at = ?2, updated_at = ?2
+            WHERE source_id = ?1
+            "#,
+        )
+        .bind(&source_id)
+        .bind(&timestamp)
+        .execute(&mut *tx)
+        .await?;
+    } else {
+        sqlx::query(
+            r#"
+            UPDATE browser_tail_sources
+            SET enabled = 0, last_seen_at = ?2, updated_at = ?2
+            WHERE source_id = ?1
+            "#,
+        )
+        .bind(&source_id)
+        .bind(&timestamp)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(source.active_run_id)
 }
 
 async fn status_for_file(
@@ -395,6 +501,7 @@ async fn status_for_file(
 
     Ok(BrowserTailStatus {
         source_id: source.source_id,
+        machine_id: source.machine_id,
         source_name: source.name,
         active_file_name: Some(file.file_name),
         active_run_id: Some(file.run_id),
@@ -455,7 +562,7 @@ async fn load_source(
 ) -> anyhow::Result<Option<BrowserTailSourceRow>> {
     Ok(sqlx::query_as::<_, BrowserTailSourceRow>(
         r#"
-        SELECT source_id, name, active_file_name, active_run_id, last_seen_at
+        SELECT source_id, machine_id, name, active_file_name, active_run_id, last_seen_at
         FROM browser_tail_sources
         WHERE source_id = ?1
         "#,

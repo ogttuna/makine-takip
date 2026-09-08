@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   fetchBrowserTailStatus,
   openBrowserTailFile,
+  stopBrowserTailSource,
   syncBrowserTailChunk,
   type BrowserTailStatus,
 } from "./api";
@@ -52,6 +53,7 @@ export type BrowserCsvTailState = {
 };
 
 type BrowserCsvTailOptions = {
+  machineId: number;
   onSynced?: (runId: number | null, insertedCount: number, rejectedCount: number) => void;
 };
 
@@ -60,7 +62,7 @@ type CsvFileIssue = {
   message: string;
 };
 
-export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
+export function useBrowserCsvTail({ machineId, onSynced }: BrowserCsvTailOptions) {
   const supported = typeof window.showDirectoryPicker === "function";
   const [state, setState] = useState<BrowserCsvTailState>(() => ({
     supported,
@@ -77,7 +79,7 @@ export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
     lastError: null,
   }));
   const directoryRef = useRef<FileSystemDirectoryHandle | null>(null);
-  const sourceIdRef = useRef(browserTailSourceId());
+  const sourceIdRef = useRef(browserTailSourceId(machineId));
   const enabledRef = useRef(false);
   const scanningRef = useRef(false);
   const intervalRef = useRef<number | null>(null);
@@ -172,6 +174,7 @@ export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
         try {
           opened = await openBrowserTailFile({
             source_id: sourceIdRef.current,
+            machine_id: machineId,
             source_name: directory.name,
             file_name: file.name,
             header_line: header.line,
@@ -248,7 +251,7 @@ export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
     } finally {
       scanningRef.current = false;
     }
-  }, [scheduleRetry]);
+  }, [machineId, scheduleRetry]);
 
   scanNowRef.current = scanNow;
 
@@ -256,7 +259,7 @@ export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
     (directory: FileSystemDirectoryHandle) => {
       directoryRef.current = directory;
       enabledRef.current = true;
-      setBrowserTailEnabled(true);
+      setBrowserTailEnabled(machineId, true);
       clearTimers();
       intervalRef.current = window.setInterval(() => {
         void scanNowRef.current();
@@ -271,7 +274,7 @@ export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
       }));
       void scanNowRef.current();
     },
-    [clearTimers],
+    [clearTimers, machineId],
   );
 
   const chooseDirectory = useCallback(async () => {
@@ -286,16 +289,20 @@ export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
 
     try {
       const directory = await window.showDirectoryPicker({
-        id: "freezedry-machine-csv",
+        id: `freezedry-machine-${machineId}-csv`,
         mode: "read",
       });
       const previousDirectory = directoryRef.current;
       const isSameDirectory = previousDirectory
         ? await directory.isSameEntry(previousDirectory)
         : false;
-      await saveDirectoryHandle(directory);
+      if (!isSameDirectory && previousDirectory) {
+        await stopBrowserTailSource(sourceIdRef.current, true);
+        onSyncedRef.current?.(null, 0, 0);
+      }
+      await saveDirectoryHandle(machineId, directory);
       if (!isSameDirectory) {
-        sourceIdRef.current = createNewBrowserTailSourceId();
+        sourceIdRef.current = createNewBrowserTailSourceId(machineId);
         setState((current) => ({
           ...current,
           activeFileName: null,
@@ -318,10 +325,10 @@ export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
         lastError: errorMessage(error),
       }));
     }
-  }, [startLoop]);
+  }, [machineId, startLoop]);
 
   const resume = useCallback(async () => {
-    const directory = directoryRef.current ?? (await loadDirectoryHandle());
+    const directory = directoryRef.current ?? (await loadDirectoryHandle(machineId));
     if (!directory) {
       await chooseDirectory();
       return;
@@ -350,11 +357,11 @@ export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
         lastError: errorMessage(error),
       }));
     }
-  }, [chooseDirectory, startLoop]);
+  }, [chooseDirectory, machineId, startLoop]);
 
   const stop = useCallback(() => {
     enabledRef.current = false;
-    setBrowserTailEnabled(false);
+    setBrowserTailEnabled(machineId, false);
     clearTimers();
     setState((current) => ({
       ...current,
@@ -362,7 +369,16 @@ export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
       status: "stopped",
       lastError: null,
     }));
-  }, [clearTimers]);
+    void stopBrowserTailSource(sourceIdRef.current)
+      .then(() => onSyncedRef.current?.(null, 0, 0))
+      .catch((error) => {
+        setState((current) => ({
+          ...current,
+          status: isConnectivityError(error) ? "offline" : "degraded",
+          lastError: errorMessage(error),
+        }));
+      });
+  }, [clearTimers, machineId]);
 
   useEffect(() => {
     if (!supported) {
@@ -370,7 +386,7 @@ export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
     }
 
     let cancelled = false;
-    void loadDirectoryHandle()
+    void loadDirectoryHandle(machineId)
       .then(async (directory) => {
         if (cancelled || !directory) {
           return;
@@ -389,7 +405,7 @@ export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
           status: permission === "granted" ? "stopped" : "permission_required",
         }));
 
-        if (permission === "granted" && isBrowserTailEnabled()) {
+        if (permission === "granted" && isBrowserTailEnabled(machineId)) {
           startLoop(directory);
         }
       })
@@ -424,7 +440,7 @@ export function useBrowserCsvTail({ onSynced }: BrowserCsvTailOptions = {}) {
       window.removeEventListener("focus", wake);
       document.removeEventListener("visibilitychange", visibility);
     };
-  }, [clearTimers, startLoop, supported]);
+  }, [clearTimers, machineId, startLoop, supported]);
 
   return {
     state,

@@ -12,6 +12,8 @@ const TIME_GAP_WARNING_SECONDS: f64 = 360.0;
 #[derive(Debug, Deserialize)]
 pub struct CreateRunRequest {
     pub name: String,
+    #[serde(default)]
+    pub machine_id: Option<i64>,
     #[serde(default = "default_source_kind")]
     pub source_kind: String,
     pub source_name: Option<String>,
@@ -94,6 +96,7 @@ struct PreparedMeasurement {
 pub async fn create_run(pool: &SqlitePool, request: CreateRunRequest) -> anyhow::Result<i64> {
     let name = non_empty(request.name, "run name")?;
     let source_kind = non_empty(request.source_kind, "source kind")?;
+    let machine_id = crate::fleet::resolve_machine_id(pool, request.machine_id).await?;
     let started_at = request
         .started_at
         .as_deref()
@@ -102,12 +105,13 @@ pub async fn create_run(pool: &SqlitePool, request: CreateRunRequest) -> anyhow:
 
     let run_id = sqlx::query_scalar::<_, i64>(
         r#"
-        INSERT INTO runs (name, source_kind, source_name, started_at, status, notes)
-        VALUES (?1, ?2, ?3, ?4, 'running', ?5)
+        INSERT INTO runs (name, machine_id, source_kind, source_name, started_at, status, notes)
+        VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6)
         RETURNING id
         "#,
     )
     .bind(name)
+    .bind(machine_id)
     .bind(source_kind)
     .bind(request.source_name)
     .bind(started_at)

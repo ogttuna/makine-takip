@@ -1,6 +1,23 @@
 import type { Locale } from "./i18n";
 
-export type ChannelGroup = "shelf" | "pressure" | "vacuum" | "cooling" | "other";
+export type ChannelGroup =
+  | "shelf_temperature"
+  | "cooling_temperature"
+  | "pressure"
+  | "vacuum"
+  | "mass"
+  | "power"
+  | "energy"
+  | "other";
+
+export type ChannelAxis =
+  | "temperature"
+  | "pressure"
+  | "vacuum"
+  | "mass"
+  | "power"
+  | "energy"
+  | "generic";
 
 export type ChannelConfig = {
   code: string;
@@ -10,190 +27,108 @@ export type ChannelConfig = {
   group: ChannelGroup;
   color: string;
   colorDark?: string;
-  axis: "main" | "vacuum";
+  axis: ChannelAxis;
+  scale?: "linear" | "log";
   derived?: boolean;
 };
 
 export const SHELF_AVERAGE_CHANNEL = "RAF_AVG";
 export const SHELF_CHANNELS = ["RAF1", "RAF2", "RAF3", "RAF4"];
 
+export const CHANNEL_GROUP_ORDER: ChannelGroup[] = [
+  "shelf_temperature",
+  "cooling_temperature",
+  "pressure",
+  "vacuum",
+  "mass",
+  "power",
+  "energy",
+  "other",
+];
+
 const channelConfigs: Record<string, ChannelConfig> = {
-  RAF1: {
-    code: "RAF1",
-    label: "RAF1 hedef",
-    labelEn: "Shelf 1 target",
-    unit: "°C",
-    group: "shelf",
-    color: "#2563eb",
-    colorDark: "#60a5fa",
-    axis: "main",
-  },
-  RAF2: {
-    code: "RAF2",
-    label: "RAF2 hedef",
-    labelEn: "Shelf 2 target",
-    unit: "°C",
-    group: "shelf",
-    color: "#16803c",
-    colorDark: "#4ade80",
-    axis: "main",
-  },
-  RAF3: {
-    code: "RAF3",
-    label: "RAF3 hedef",
-    labelEn: "Shelf 3 target",
-    unit: "°C",
-    group: "shelf",
-    color: "#b7791f",
-    colorDark: "#f59e0b",
-    axis: "main",
-  },
-  RAF4: {
-    code: "RAF4",
-    label: "RAF4 hedef",
-    labelEn: "Shelf 4 target",
-    unit: "°C",
-    group: "shelf",
-    color: "#7c3aed",
-    colorDark: "#a78bfa",
-    axis: "main",
-  },
+  RAF1: temperatureChannel("RAF1", "Raf 1 hedef", "Shelf 1 target", "#b64924", "#f08a5d", "shelf_temperature"),
+  RAF2: temperatureChannel("RAF2", "Raf 2 hedef", "Shelf 2 target", "#1f6f5f", "#69c2aa", "shelf_temperature"),
+  RAF3: temperatureChannel("RAF3", "Raf 3 hedef", "Shelf 3 target", "#315b8a", "#79a8d8", "shelf_temperature"),
+  RAF4: temperatureChannel("RAF4", "Raf 4 hedef", "Shelf 4 target", "#8b5a2b", "#d0a06b", "shelf_temperature"),
   RAF_AVG: {
-    code: SHELF_AVERAGE_CHANNEL,
-    label: "Aktif raf hedef ort.",
-    labelEn: "Active shelf target avg.",
-    unit: "°C",
-    group: "shelf",
-    color: "#111827",
-    colorDark: "#f8fafc",
-    axis: "main",
+    ...temperatureChannel(
+      SHELF_AVERAGE_CHANNEL,
+      "Aktif raf ortalaması",
+      "Active shelf average",
+      "#202624",
+      "#f2eee6",
+      "shelf_temperature",
+    ),
     derived: true,
   },
+  S1: temperatureChannel("S1", "Serpantin sensörü S1", "Coil sensor S1", "#be3b3b", "#ff8585", "cooling_temperature"),
+  S2: temperatureChannel("S2", "Serpantin sensörü S2", "Coil sensor S2", "#cc7722", "#f2a65a", "cooling_temperature"),
+  S3: temperatureChannel("S3", "Serpantin sensörü S3", "Coil sensor S3", "#6a4c93", "#b99ad9", "cooling_temperature"),
+  S4: temperatureChannel("S4", "Serpantin sensörü S4", "Coil sensor S4", "#2f6f8f", "#76b7d5", "cooling_temperature"),
+  SERP2: temperatureChannel("SERP2", "Serpantin 2", "Coil 2", "#197278", "#66c7c9", "cooling_temperature"),
+  SERP4: temperatureChannel("SERP4", "Serpantin 4", "Coil 4", "#305f72", "#7eb5c8", "cooling_temperature"),
+  KONDANSER: temperatureChannel("KONDANSER", "Kondenser", "Condenser", "#725f3f", "#c9ac77", "cooling_temperature"),
   L_PRES: {
     code: "L_PRES",
-    label: "L Pres",
-    unit: null,
+    label: "Düşük basınç",
+    labelEn: "Low pressure",
+    unit: "bar",
     group: "pressure",
-    color: "#dc2626",
-    colorDark: "#fb3b3f",
-    axis: "main",
+    color: "#356b88",
+    colorDark: "#79b7d5",
+    axis: "pressure",
   },
   H_PRES: {
     code: "H_PRES",
-    label: "H Pres",
-    unit: null,
+    label: "Yüksek basınç",
+    labelEn: "High pressure",
+    unit: "bar",
     group: "pressure",
-    color: "#f97316",
-    colorDark: "#fb923c",
-    axis: "main",
+    color: "#b64924",
+    colorDark: "#f08a5d",
+    axis: "pressure",
   },
   VACUM: {
     code: "VACUM",
-    label: "Vakum",
-    labelEn: "Vacuum",
-    unit: null,
+    label: "Hazne vakumu",
+    labelEn: "Chamber vacuum",
+    unit: "mbar",
     group: "vacuum",
-    color: "#64748b",
-    colorDark: "#cbd5e1",
+    color: "#3f4f4a",
+    colorDark: "#b7c6c0",
     axis: "vacuum",
-  },
-  S1: {
-    code: "S1",
-    label: "S1 sol üst",
-    labelEn: "S1 upper left",
-    unit: "°C",
-    group: "cooling",
-    color: "#0369a1",
-    colorDark: "#38bdf8",
-    axis: "main",
-  },
-  S2: {
-    code: "S2",
-    label: "S2 sol alt",
-    labelEn: "S2 lower left",
-    unit: "°C",
-    group: "cooling",
-    color: "#0f766e",
-    colorDark: "#2dd4bf",
-    axis: "main",
-  },
-  S3: {
-    code: "S3",
-    label: "S3 sağ üst",
-    labelEn: "S3 upper right",
-    unit: "°C",
-    group: "cooling",
-    color: "#7c3aed",
-    colorDark: "#a78bfa",
-    axis: "main",
-  },
-  S4: {
-    code: "S4",
-    label: "S4 sağ alt",
-    labelEn: "S4 lower right",
-    unit: "°C",
-    group: "cooling",
-    color: "#b45309",
-    colorDark: "#f59e0b",
-    axis: "main",
-  },
-  SERP2: {
-    code: "SERP2",
-    label: "Serp 2",
-    unit: "°C",
-    group: "cooling",
-    color: "#0284c7",
-    colorDark: "#38bdf8",
-    axis: "main",
-  },
-  SERP4: {
-    code: "SERP4",
-    label: "Serp 4",
-    unit: "°C",
-    group: "cooling",
-    color: "#0f766e",
-    colorDark: "#2dd4bf",
-    axis: "main",
-  },
-  KONDANSER: {
-    code: "KONDANSER",
-    label: "Kondanser",
-    labelEn: "Condenser",
-    unit: "°C",
-    group: "cooling",
-    color: "#7a5c2e",
-    colorDark: "#d6a75f",
-    axis: "main",
+    scale: "log",
   },
   TARTIM: {
     code: "TARTIM",
-    label: "Tartım",
-    labelEn: "Weight",
+    label: "Ürün ağırlığı",
+    labelEn: "Product weight",
     unit: "kg",
-    group: "other",
-    color: "#475569",
-    colorDark: "#cbd5e1",
-    axis: "main",
+    group: "mass",
+    color: "#5b4a79",
+    colorDark: "#b8a3dc",
+    axis: "mass",
   },
   "E.GUC": {
     code: "E.GUC",
-    label: "Enerji gücü",
-    labelEn: "Power",
-    unit: null,
-    group: "other",
-    color: "#be123c",
-    colorDark: "#fb7185",
-    axis: "main",
+    label: "Anlık güç",
+    labelEn: "Instant power",
+    unit: "kW",
+    group: "power",
+    color: "#b85c00",
+    colorDark: "#f0a04b",
+    axis: "power",
   },
   "E.TUKETIM": {
     code: "E.TUKETIM",
-    label: "Enerji tüketimi",
-    labelEn: "Energy consumption",
-    unit: null,
-    group: "other",
-    color: "#a16207",
-    colorDark: "#facc15",
-    axis: "main",
+    label: "Toplam enerji",
+    labelEn: "Total energy",
+    unit: "kWh",
+    group: "energy",
+    color: "#8a6d1d",
+    colorDark: "#d8bd61",
+    axis: "energy",
   },
 };
 
@@ -204,8 +139,9 @@ export function getChannelConfig(code: string): ChannelConfig {
       label: code,
       unit: null,
       group: "other",
-      color: "#475569",
-      axis: "main",
+      color: "#59645f",
+      colorDark: "#b7c0bc",
+      axis: "generic",
     }
   );
 }
@@ -229,15 +165,32 @@ export function sortChannels(channels: string[]): string[] {
     if (aIndex === -1 && bIndex === -1) {
       return a.localeCompare(b);
     }
-
     if (aIndex === -1) {
       return 1;
     }
-
     if (bIndex === -1) {
       return -1;
     }
-
     return aIndex - bIndex;
   });
+}
+
+function temperatureChannel(
+  code: string,
+  label: string,
+  labelEn: string,
+  color: string,
+  colorDark: string,
+  group: Extract<ChannelGroup, "shelf_temperature" | "cooling_temperature">,
+): ChannelConfig {
+  return {
+    code,
+    label,
+    labelEn,
+    unit: "°C",
+    group,
+    color,
+    colorDark,
+    axis: "temperature",
+  };
 }

@@ -12,6 +12,7 @@ async fn appends_source_agnostic_live_samples_and_skips_duplicate_sequences() {
         &pool,
         CreateRunRequest {
             name: "Network feed".to_string(),
+            machine_id: None,
             source_kind: "http_push".to_string(),
             source_name: Some("https://machine.local/feed".to_string()),
             started_at: None,
@@ -415,6 +416,7 @@ async fn create_network_run(pool: &sqlx::SqlitePool) -> i64 {
         pool,
         CreateRunRequest {
             name: "Network feed".to_string(),
+            machine_id: None,
             source_kind: "http_push".to_string(),
             source_name: Some("https://machine.local/feed".to_string()),
             started_at: None,

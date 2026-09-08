@@ -28,6 +28,8 @@ const MAX_HEADER_BYTES: usize = 64 * 1024;
 #[derive(Debug, Deserialize)]
 pub struct CsvTailConfigRequest {
     pub name: Option<String>,
+    #[serde(default)]
+    pub machine_id: Option<i64>,
     pub directory_path: String,
     pub file_pattern: Option<String>,
     pub scan_interval_ms: Option<i64>,
@@ -36,6 +38,7 @@ pub struct CsvTailConfigRequest {
 #[derive(Debug, Clone, Serialize)]
 pub struct CsvTailStatus {
     pub configured: bool,
+    pub machine_id: Option<i64>,
     pub name: String,
     pub directory_path: String,
     pub file_pattern: String,
@@ -54,6 +57,7 @@ pub struct CsvTailStatus {
 #[derive(Debug, Clone, FromRow)]
 struct CsvTailSource {
     id: i64,
+    machine_id: Option<i64>,
     name: String,
     directory_path: String,
     file_pattern: String,
@@ -131,6 +135,8 @@ impl CsvTailManager {
     pub async fn configure(&self, request: CsvTailConfigRequest) -> anyhow::Result<CsvTailStatus> {
         self.stop().await?;
 
+        let machine_id =
+            crate::fleet::resolve_machine_id(&self.inner.pool, request.machine_id).await?;
         let name = non_empty(
             request.name.unwrap_or_else(|| DEFAULT_NAME.to_string()),
             "name",
@@ -151,7 +157,9 @@ impl CsvTailManager {
         let directory_path = directory.to_string_lossy().to_string();
         let existing_source = load_source(&self.inner.pool).await?;
         let same_source = existing_source.as_ref().is_some_and(|source| {
-            source.directory_path == directory_path && source.file_pattern == file_pattern
+            source.directory_path == directory_path
+                && source.file_pattern == file_pattern
+                && source.machine_id == Some(machine_id)
         });
 
         if same_source {
@@ -161,15 +169,17 @@ impl CsvTailManager {
                 SET
                     name = ?2,
                     scan_interval_ms = ?3,
+                    machine_id = ?4,
                     enabled = 0,
                     last_error = NULL,
-                    updated_at = ?4
+                    updated_at = ?5
                 WHERE id = ?1
                 "#,
             )
             .bind(SOURCE_ID)
             .bind(name)
             .bind(scan_interval_ms)
+            .bind(machine_id)
             .bind(now())
             .execute(&self.inner.pool)
             .await?;
@@ -202,6 +212,7 @@ impl CsvTailManager {
                 r#"
                 INSERT INTO csv_tail_sources (
                     id,
+                    machine_id,
                     name,
                     directory_path,
                     file_pattern,
@@ -212,8 +223,9 @@ impl CsvTailManager {
                     last_error,
                     updated_at
                 )
-                VALUES (1, ?1, ?2, ?3, ?4, 0, NULL, NULL, NULL, ?5)
+                VALUES (1, ?1, ?2, ?3, ?4, ?5, 0, NULL, NULL, NULL, ?6)
                 ON CONFLICT(id) DO UPDATE SET
+                    machine_id = excluded.machine_id,
                     name = excluded.name,
                     directory_path = excluded.directory_path,
                     file_pattern = excluded.file_pattern,
@@ -225,6 +237,7 @@ impl CsvTailManager {
                     updated_at = excluded.updated_at
                 "#,
             )
+            .bind(machine_id)
             .bind(name)
             .bind(directory_path)
             .bind(file_pattern)
@@ -311,6 +324,7 @@ impl CsvTailManager {
         let Some(source) = load_source(&self.inner.pool).await? else {
             return Ok(CsvTailStatus {
                 configured: false,
+                machine_id: None,
                 name: DEFAULT_NAME.to_string(),
                 directory_path: String::new(),
                 file_pattern: DEFAULT_PATTERN.to_string(),
@@ -346,6 +360,7 @@ impl CsvTailManager {
 
         Ok(CsvTailStatus {
             configured: true,
+            machine_id: source.machine_id,
             name: source.name,
             directory_path: source.directory_path,
             file_pattern: source.file_pattern,
@@ -518,6 +533,7 @@ impl CsvTailManager {
                     &self.inner.pool,
                     CreateRunRequest {
                         name: file_name(&newest_ready.path)?,
+                        machine_id: source.machine_id,
                         source_kind: "csv_tail".to_string(),
                         source_name: Some(source.directory_path.clone()),
                         started_at: None,
@@ -641,6 +657,9 @@ impl CsvTailManager {
                     &self.inner.pool,
                     CreateRunRequest {
                         name: file_name(file_path)?,
+                        machine_id: load_source(&self.inner.pool)
+                            .await?
+                            .and_then(|source| source.machine_id),
                         source_kind: "csv_tail".to_string(),
                         source_name: Some(file_path.to_string()),
                         started_at: None,
@@ -882,6 +901,7 @@ async fn load_source(pool: &SqlitePool) -> anyhow::Result<Option<CsvTailSource>>
         r#"
         SELECT
             id,
+            machine_id,
             name,
             directory_path,
             file_pattern,

@@ -29,6 +29,7 @@ import {
 import {
   channelColor,
   channelLabel,
+  type ChannelAxis,
   getChannelConfig,
   SHELF_AVERAGE_CHANNEL,
   SHELF_CHANNELS,
@@ -56,7 +57,7 @@ type TelemetryChartOption = ComposeOption<
   | TooltipComponentOption
 >;
 
-type AxisKind = "main" | "vacuum";
+type AxisKind = ChannelAxis;
 
 type AxisLayout = {
   indexByKind: Partial<Record<AxisKind, number>>;
@@ -547,64 +548,67 @@ function buildAxisLayout(
   palette: ChartPalette,
   locale: Locale,
 ): AxisLayout {
-  const axisKinds = new Set<AxisKind>(
-    channels.map((channel) => getChannelConfig(channel).axis),
-  );
+  const axisKinds = [
+    ...new Set<AxisKind>(channels.map((channel) => getChannelConfig(channel).axis)),
+  ];
   const yAxis: YAXisComponentOption[] = [];
   const indexByKind: Partial<Record<AxisKind, number>> = {};
-  const includeMainAxis = axisKinds.has("main") || axisKinds.size === 0;
+  const resolvedKinds = axisKinds.length > 0 ? axisKinds : (["generic"] as AxisKind[]);
 
-  if (includeMainAxis) {
-    indexByKind.main = yAxis.length;
+  resolvedKinds.forEach((kind, index) => {
+    const definition = axisDefinition(kind, locale);
+    indexByKind[kind] = index;
     yAxis.push({
-      type: "value",
-      name: locale === "en" ? "Value" : "Değer",
+      type: definition.scale,
+      name: definition.label,
+      min: definition.minimum,
+      nameGap: 18,
       nameTextStyle: {
         color: palette.legendText,
         fontFamily: CHART_FONT_FAMILY,
+        fontSize: 11,
         fontWeight: 700,
       },
-      position: "left",
+      position: index % 2 === 0 ? "left" : "right",
+      offset: index > 1 ? Math.floor(index / 2) * 48 : 0,
       axisLabel: {
         color: palette.axisText,
         fontFamily: CHART_FONT_FAMILY,
         fontWeight: 600,
       },
-      splitLine: {
-        lineStyle: {
-          color: palette.splitLine,
-        },
-      },
-    });
-  }
-
-  if (axisKinds.has("vacuum")) {
-    indexByKind.vacuum = yAxis.length;
-    yAxis.push({
-      type: "log",
-      name: locale === "en" ? "Vacuum" : "Vakum",
-      nameTextStyle: {
-        color: palette.legendText,
-        fontFamily: CHART_FONT_FAMILY,
-        fontWeight: 700,
-      },
-      min: 0.000_001,
-      position: includeMainAxis ? "right" : "left",
-      axisLabel: {
-        color: palette.axisText,
-        fontFamily: CHART_FONT_FAMILY,
-        fontWeight: 600,
+      axisLine: {
+        show: true,
+        lineStyle: { color: palette.axisLine },
       },
       splitLine: {
-        show: !includeMainAxis,
-        lineStyle: {
-          color: palette.splitLine,
-        },
+        show: index === 0,
+        lineStyle: { color: palette.splitLine },
       },
     });
-  }
+  });
 
   return { indexByKind, yAxis };
+}
+
+function axisDefinition(
+  axis: AxisKind,
+  locale: Locale,
+): { label: string; minimum?: number; scale: "value" | "log" } {
+  const labels: Record<AxisKind, { en: string; tr: string }> = {
+    temperature: { tr: "Sıcaklık · °C", en: "Temperature · °C" },
+    pressure: { tr: "Basınç · bar", en: "Pressure · bar" },
+    vacuum: { tr: "Vakum · mbar", en: "Vacuum · mbar" },
+    mass: { tr: "Ağırlık · kg", en: "Weight · kg" },
+    power: { tr: "Güç · kW", en: "Power · kW" },
+    energy: { tr: "Enerji · kWh", en: "Energy · kWh" },
+    generic: { tr: "Cihaz değeri", en: "Device value" },
+  };
+
+  return {
+    label: labels[axis][locale],
+    minimum: axis === "vacuum" ? 0.000_001 : undefined,
+    scale: axis === "vacuum" ? "log" : "value",
+  };
 }
 
 function chartPalette(themeMode: "light" | "dark"): ChartPalette {
@@ -644,7 +648,7 @@ function chartPalette(themeMode: "light" | "dark"): ChartPalette {
 }
 
 function axisIndexFor(axisLayout: AxisLayout, axis: AxisKind): number {
-  return axisLayout.indexByKind[axis] ?? axisLayout.indexByKind.main ?? 0;
+  return axisLayout.indexByKind[axis] ?? axisLayout.indexByKind.generic ?? 0;
 }
 
 function seriesName(channel: string, locale: Locale): string {

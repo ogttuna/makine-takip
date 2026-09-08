@@ -5,10 +5,11 @@ ve grafiklerle izlemek icin web-oncelikli yerel veri toplama uygulamasi.
 
 ## Durum
 
-Bu repo su an calisan bir ilk iskelet icerir:
+Bu repo calisan, cok makineli bir operator ve proses izleme uygulamasi icerir:
 
 - Vite + React + TypeScript operator arayuzu
-- Apache ECharts ile zaman serisi grafigi
+- Makine filosu, makine bazli kosular ve birbirinden bagimsiz CSV klasor kaynaklari
+- Apache ECharts ile fiziksel birimlerine gore ayrilmis zaman serisi grafikleri
 - TanStack Query ile collector API polling
 - Zod ile runtime API dogrulama
 - Tauri 2 masaustu operator uygulamasi
@@ -21,10 +22,12 @@ Bu repo su an calisan bir ilk iskelet icerir:
 
 ## Hedef
 
-Bu proje ilk asamada tek makineye baglanan yerel bir web operator uygulamasi
-olarak tasarlanir. Ana hedefler:
+Bu proje birden fazla dondurarak kurutma makinesini ayni panelden izleyen,
+lokal-first bir web operator uygulamasidir. Ana hedefler:
 
 - Makineden gelen sensor ve proses verilerini guvenilir sekilde kaydetmek.
+- Her makineyi kendi klasor kaynagi, kosulari, checkpoint'leri ve kalite
+  olaylariyla birbirinden ayirmak.
 - Canli ve gecmis proses grafiklerini operator ekraninda gostermek.
 - Her kurutma kosusunu tarih, recete, parti ve notlarla takip etmek.
 - FD-750 proses dongulerini ve state gecislerini ham veriden tekrar
@@ -157,10 +160,13 @@ Uzak erisim icin onerilen akis soyledir:
 1. Uygulama ve collector, fabrika PC'sinin de uzak izleyicilerin de
    erisebildigi ayni HTTPS adresinde calisir.
 2. Fabrika PC'sinde Chrome veya Edge ile bu adres acilir.
-3. **Islemler > Kaynak > CSV klasorunu sec** ile makinenin log klasoru secilir.
+3. Sol taraftaki **Makine Parki** alanindan makine eklenir veya secilir.
+4. Her makine kartindaki **Klasor bagla** ile o makinenin log klasoru secilir.
    Bu klasor yerel disk, map edilmis ag surucusu veya tarayicinin dosya
    secicisinde gorulebilen bir network share olabilir.
-4. Fabrika sekmesi acik kaldigi surece yalnizca yeni tamamlanmis CSV satirlari
+5. Ayni sekmede farkli makinelere farkli klasorler baglanabilir; taramalar ve
+   checkpoint'ler makine bazinda, birbirinden bagimsiz calisir.
+6. Fabrika sekmesi acik kaldigi surece yalnizca yeni tamamlanmis CSV satirlari
    sunucuya gonderilir. Uzak bilgisayarlar ayni adrese girip kayitli ve canli
    veriyi gorur; onlarin klasor secmesi gerekmez.
 
@@ -172,6 +178,8 @@ proxy arkasinda yayinlayin.
 
 Klasor secildikten sonra sistem:
 
+- kaynagi secili makineye baglar; bir makinenin verisini diger makinenin
+  kosularina veya grafiklerine karistirmaz,
 - klasordeki eski `*.csv` dosyalarini ayni run'a ekler; gecerli
   `LogFile_YYYY_MM_DD.csv` dosyalarini klasordeki baska bir CSV'nin adindan veya
   kopyalanma zamanindan etkilenmeden adlarindaki tarihe gore siralar,
@@ -188,6 +196,9 @@ Klasor secildikten sonra sistem:
   kalite hatasi olarak kaydedip sonraki gecerli dosyaya devam eder,
 - ayni satir tekrar taransa bile source sequence ile ikinci kez yazmaz,
 - ayni klasor yeniden yapilandirildiginda mevcut run ve checkpoint'leri korur,
+- **Durdur** taramayi duraklatir ve ayni klasor tekrar baslatildiginda mevcut
+  kosudan devam eder; **Klasoru degistir** eski kosuyu tamamlayip yeni klasor
+  icin ayri bir kaynak ve kosu acar,
 - yeni sample sorgularinda son sequence'ten sonrasini alir; yeni satir yoksa
   grafige eski noktayi yeniden eklemez,
 - 30 saniyelik tarama/polling araligini yalnizca goruntuleme gecikmesi olarak
@@ -233,6 +244,11 @@ araya veri uydurmaz, onceki satiri tekrar etmez ve zamani kaydirmaz. 360
 saniyeden buyuk aralik `time_gap` uyarisi olur ve grafik cizgisi bu boslukta
 kesilir.
 
+Grafikler sensor adina gore gelisi guzel bolunmez. Raf sicakliklari ile S1-S4
+serpantin/sogutma sensorleri ayri panellerde `°C`; dusuk/yuksek basinc `bar`; vakum logaritmik
+eksende `mbar`; agirlik `kg`; anlik guc `kW`; toplam enerji `kWh` olarak
+gosterilir. Boylece farkli fiziksel buyuklukler ayni ekseni paylasmaz.
+
 Grafik varsayilan olarak run'in en yeni kaydina gore kayan son 24 saati
 gosterir; bu nedenle gecmis bir run da bilgisayarin bugunku saatine gore bos
 kalmaz. Operator `24 Saat`, `7 Gun` ve `Tumu` secenekleriyle gorunumu
@@ -245,11 +261,19 @@ basligi gorunen kayit sayisini ve canli kosuda o anda izlenen dosyayi gosterir.
 Ilgili endpointler:
 
 ```text
+GET  /api/machines
+POST /api/machines
+PATCH /api/machines/:id
+GET  /api/runs?machine_id=:id
 GET  /api/csv-tail
 PUT  /api/csv-tail
 POST /api/csv-tail/start
 POST /api/csv-tail/stop
 POST /api/csv-tail/rescan
+GET  /api/browser-tail/:source_id
+POST /api/browser-tail/:source_id/stop
+POST /api/browser-tail/open
+POST /api/browser-tail/chunk
 GET  /api/runs/:id/samples?latest=5000
 GET  /api/runs/:id/samples?after_sequence=162&limit=1000
 GET  /api/runs/:id/analysis
@@ -346,6 +370,7 @@ olusur. Tauri masaustu uygulamasi varsayilan olarak isletim sisteminin uygulama
 veri klasorundeki `freezedry.db` dosyasini kullanir. Bu dosyalar Git'e alinmaz.
 Migration ilk calismada su tablolari kurar:
 
+- `machines`
 - `runs`
 - `import_files`
 - `channels`

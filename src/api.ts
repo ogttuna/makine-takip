@@ -16,6 +16,9 @@ export const importReportSchema = z.object({
 
 export const runSummarySchema = z.object({
   id: z.number(),
+  machine_id: z.number().nullable(),
+  machine_name: z.string().nullable(),
+  machine_code: z.string().nullable(),
   name: z.string(),
   source_kind: z.string(),
   source_name: z.string().nullable(),
@@ -25,6 +28,27 @@ export const runSummarySchema = z.object({
   row_count: z.number(),
   warning_count: z.number(),
   error_count: z.number(),
+});
+
+export const machineSummarySchema = z.object({
+  id: z.number(),
+  code: z.string(),
+  name: z.string(),
+  model: z.string().nullable(),
+  location: z.string().nullable(),
+  status: z.enum(["active", "maintenance", "inactive"]),
+  active_run_id: z.number().nullable(),
+  active_run_name: z.string().nullable(),
+  last_sampled_at: z.string().nullable(),
+  last_seen_at: z.string().nullable(),
+  source_count: z.number(),
+  run_count: z.number(),
+  warning_count: z.number(),
+  error_count: z.number(),
+});
+
+export const machinesResponseSchema = z.object({
+  machines: z.array(machineSummarySchema),
 });
 
 export const measurementSchema = z.object({
@@ -175,6 +199,7 @@ export const appendSamplesReportSchema = z.object({
 
 export const csvTailStatusSchema = z.object({
   configured: z.boolean(),
+  machine_id: z.number().nullable(),
   name: z.string(),
   directory_path: z.string(),
   file_pattern: z.string(),
@@ -192,6 +217,7 @@ export const csvTailStatusSchema = z.object({
 
 export const browserTailStatusSchema = z.object({
   source_id: z.string(),
+  machine_id: z.number().nullable(),
   source_name: z.string(),
   active_file_name: z.string().nullable(),
   active_run_id: z.number().nullable(),
@@ -212,6 +238,7 @@ export const browserTailChunkResponseSchema = browserTailStatusSchema.extend({
 });
 
 export type ImportReport = z.infer<typeof importReportSchema>;
+export type MachineSummary = z.infer<typeof machineSummarySchema>;
 export type RunSummary = z.infer<typeof runSummarySchema>;
 export type Measurement = z.infer<typeof measurementSchema>;
 export type SampleFrame = z.infer<typeof sampleFrameSchema>;
@@ -230,6 +257,7 @@ export type BrowserTailChunkResponse = z.infer<typeof browserTailChunkResponseSc
 
 export type CsvTailConfigPayload = {
   name?: string;
+  machine_id?: number;
   directory_path: string;
   file_pattern?: string;
   scan_interval_ms?: number;
@@ -237,6 +265,7 @@ export type CsvTailConfigPayload = {
 
 export type BrowserTailOpenPayload = {
   source_id: string;
+  machine_id: number;
   source_name: string;
   file_name: string;
   header_line: string;
@@ -255,10 +284,22 @@ export type BrowserTailChunkPayload = {
 
 export type CreateRunPayload = {
   name: string;
+  machine_id?: number;
   source_kind?: string;
   source_name?: string | null;
   started_at?: string | null;
   notes?: string | null;
+};
+
+export type CreateMachinePayload = {
+  code: string;
+  name: string;
+  model?: string | null;
+  location?: string | null;
+};
+
+export type UpdateMachinePayload = Partial<CreateMachinePayload> & {
+  status?: "active" | "maintenance" | "inactive";
 };
 
 export type AppendMeasurementPayload = {
@@ -358,6 +399,22 @@ async function putJson(url: string, payload: unknown): Promise<unknown> {
   return response.json();
 }
 
+async function patchJson(url: string, payload: unknown): Promise<unknown> {
+  const response = await fetch(url, {
+    method: "PATCH",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    throw new Error(await responseMessage(response));
+  }
+
+  return response.json();
+}
+
 async function postEmpty(url: string): Promise<unknown> {
   const response = await fetch(url, { method: "POST" });
 
@@ -377,9 +434,10 @@ async function responseMessage(response: Response): Promise<string> {
   }
 }
 
-export async function uploadCsv(file: File): Promise<ImportReport> {
+export async function uploadCsv(file: File, machineId: number): Promise<ImportReport> {
   const formData = new FormData();
   formData.append("file", file);
+  formData.append("machine_id", String(machineId));
 
   const response = await fetch(`${apiBaseUrl}/api/imports/csv`, {
     method: "POST",
@@ -394,9 +452,33 @@ export async function uploadCsv(file: File): Promise<ImportReport> {
   return importReportSchema.parse(payload);
 }
 
-export async function fetchRuns(): Promise<RunSummary[]> {
-  const payload = await getJson(`${apiBaseUrl}/api/runs`);
+export async function fetchRuns(machineId?: number): Promise<RunSummary[]> {
+  const url = new URL(`${apiBaseUrl}/api/runs`);
+  if (machineId !== undefined) {
+    url.searchParams.set("machine_id", String(machineId));
+  }
+  const payload = await getJson(url.toString());
   return runsResponseSchema.parse(payload).runs;
+}
+
+export async function fetchMachines(): Promise<MachineSummary[]> {
+  const payload = await getJson(`${apiBaseUrl}/api/machines`);
+  return machinesResponseSchema.parse(payload).machines;
+}
+
+export async function createMachine(
+  payload: CreateMachinePayload,
+): Promise<MachineSummary> {
+  const response = await postJson(`${apiBaseUrl}/api/machines`, payload);
+  return machineSummarySchema.parse(response);
+}
+
+export async function updateMachine(
+  machineId: number,
+  payload: UpdateMachinePayload,
+): Promise<MachineSummary> {
+  const response = await patchJson(`${apiBaseUrl}/api/machines/${machineId}`, payload);
+  return machineSummarySchema.parse(response);
 }
 
 export async function createRun(payload: CreateRunPayload): Promise<RunSummary> {
@@ -486,6 +568,23 @@ export async function fetchBrowserTailStatus(
   }
 
   return browserTailStatusSchema.parse(await response.json());
+}
+
+export async function stopBrowserTailSource(
+  sourceId: string,
+  completeRun = false,
+): Promise<void> {
+  const url = new URL(
+    `${apiBaseUrl}/api/browser-tail/${encodeURIComponent(sourceId)}/stop`,
+  );
+  if (completeRun) {
+    url.searchParams.set("complete_run", "true");
+  }
+  const response = await fetch(url, { method: "POST" });
+
+  if (!response.ok) {
+    throw new Error(await responseMessage(response));
+  }
 }
 
 export async function openBrowserTailFile(

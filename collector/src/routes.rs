@@ -11,8 +11,9 @@ use tower_http::services::{ServeDir, ServeFile};
 use crate::browser_tail::{
     BrowserTailChunkRequest, BrowserTailChunkResponse, BrowserTailOpenRequest, BrowserTailStatus,
 };
-use crate::csv_import::{ImportReport, import_csv_bytes};
+use crate::csv_import::{ImportReport, import_csv_bytes_for_machine};
 use crate::csv_tail::{CsvTailConfigRequest, CsvTailManager, CsvTailStatus};
+use crate::fleet::{CreateMachineRequest, MachineSummary, UpdateMachineRequest};
 use crate::ingest::{AppendSamplesReport, AppendSamplesRequest, CreateRunRequest};
 
 #[derive(Clone)]
@@ -38,6 +39,9 @@ struct LegacyLiveSnapshot {
 #[derive(Debug, Serialize, FromRow)]
 pub struct RunSummary {
     id: i64,
+    machine_id: Option<i64>,
+    machine_name: Option<String>,
+    machine_code: Option<String>,
     name: String,
     source_kind: String,
     source_name: Option<String>,
@@ -52,6 +56,22 @@ pub struct RunSummary {
 #[derive(Debug, Serialize)]
 struct RunsResponse {
     runs: Vec<RunSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct MachinesResponse {
+    machines: Vec<MachineSummary>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RunsQuery {
+    machine_id: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StopBrowserTailQuery {
+    #[serde(default)]
+    complete_run: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -178,6 +198,8 @@ pub fn router_with_csv_tail(pool: SqlitePool, csv_tail: CsvTailManager) -> Route
     Router::new()
         .route("/api/health", get(health))
         .route("/api/live", get(live))
+        .route("/api/machines", get(machines).post(create_machine))
+        .route("/api/machines/{id}", patch(update_machine))
         .route(
             "/api/csv-tail",
             get(csv_tail_status).put(configure_csv_tail),
@@ -186,6 +208,10 @@ pub fn router_with_csv_tail(pool: SqlitePool, csv_tail: CsvTailManager) -> Route
         .route("/api/csv-tail/stop", post(stop_csv_tail))
         .route("/api/csv-tail/rescan", post(rescan_csv_tail))
         .route("/api/browser-tail/{source_id}", get(browser_tail_status))
+        .route(
+            "/api/browser-tail/{source_id}/stop",
+            post(stop_browser_tail),
+        )
         .route("/api/browser-tail/open", post(open_browser_tail_file))
         .route("/api/browser-tail/chunk", post(sync_browser_tail_chunk))
         .route("/api/imports/csv", post(import_csv))
@@ -228,6 +254,34 @@ async fn live() -> Json<LegacyLiveSnapshot> {
         active_run: None,
         samples: Vec::new(),
     })
+}
+
+async fn machines(State(state): State<AppState>) -> Result<Json<MachinesResponse>, ApiError> {
+    Ok(Json(MachinesResponse {
+        machines: crate::fleet::list_machines(&state.pool).await?,
+    }))
+}
+
+async fn create_machine(
+    State(state): State<AppState>,
+    Json(request): Json<CreateMachineRequest>,
+) -> Result<(StatusCode, Json<MachineSummary>), ApiError> {
+    let machine = crate::fleet::create_machine(&state.pool, request)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok((StatusCode::CREATED, Json(machine)))
+}
+
+async fn update_machine(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(request): Json<UpdateMachineRequest>,
+) -> Result<Json<MachineSummary>, ApiError> {
+    Ok(Json(
+        crate::fleet::update_machine(&state.pool, id, request)
+            .await
+            .map_err(ApiError::bad_request)?,
+    ))
 }
 
 async fn csv_tail_status(State(state): State<AppState>) -> Result<Json<CsvTailStatus>, ApiError> {
@@ -274,6 +328,17 @@ async fn browser_tail_status(
     ))
 }
 
+async fn stop_browser_tail(
+    State(state): State<AppState>,
+    Path(source_id): Path<String>,
+    Query(query): Query<StopBrowserTailQuery>,
+) -> Result<StatusCode, ApiError> {
+    crate::browser_tail::stop_source(&state.pool, &source_id, query.complete_run)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn open_browser_tail_file(
     State(state): State<AppState>,
     Json(request): Json<BrowserTailOpenRequest>,
@@ -300,6 +365,9 @@ async fn import_csv(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> Result<Json<ImportReport>, ApiError> {
+    let mut file: Option<(String, axum::body::Bytes)> = None;
+    let mut machine_id: Option<i64> = None;
+
     while let Some(field) = multipart
         .next_field()
         .await
@@ -307,25 +375,31 @@ async fn import_csv(
     {
         let field_name = field.name().unwrap_or_default().to_string();
 
-        if field_name != "file" {
-            continue;
+        if field_name == "machine_id" {
+            let value = field.text().await.map_err(ApiError::bad_request)?;
+            machine_id = Some(value.trim().parse::<i64>().map_err(|_| {
+                ApiError::bad_request(anyhow::anyhow!("machine_id must be an integer"))
+            })?);
+        } else if field_name == "file" {
+            let file_name = field
+                .file_name()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "upload.csv".to_string());
+            let bytes = field.bytes().await.map_err(ApiError::bad_request)?;
+            file = Some((file_name, bytes));
         }
-
-        let file_name = field
-            .file_name()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| "upload.csv".to_string());
-        let bytes = field.bytes().await.map_err(ApiError::bad_request)?;
-        let report = import_csv_bytes(&state.pool, file_name, &bytes)
-            .await
-            .map_err(ApiError::bad_request)?;
-
-        return Ok(Json(report));
     }
 
-    Err(ApiError::bad_request(anyhow::anyhow!(
-        "multipart upload must include a `file` field"
-    )))
+    let (file_name, bytes) = file.ok_or_else(|| {
+        ApiError::bad_request(anyhow::anyhow!(
+            "multipart upload must include a `file` field"
+        ))
+    })?;
+    let report = import_csv_bytes_for_machine(&state.pool, file_name, &bytes, machine_id)
+        .await
+        .map_err(ApiError::bad_request)?;
+
+    Ok(Json(report))
 }
 
 async fn import_status(
@@ -377,11 +451,17 @@ async fn import_status(
     }))
 }
 
-async fn runs(State(state): State<AppState>) -> Result<Json<RunsResponse>, ApiError> {
+async fn runs(
+    State(state): State<AppState>,
+    Query(query): Query<RunsQuery>,
+) -> Result<Json<RunsResponse>, ApiError> {
     let runs = sqlx::query_as::<_, RunSummary>(
         r#"
         SELECT
             r.id,
+            r.machine_id,
+            m.name AS machine_name,
+            m.code AS machine_code,
             r.name,
             r.source_kind,
             r.source_name,
@@ -412,11 +492,14 @@ async fn runs(State(state): State<AppState>) -> Result<Json<RunsResponse>, ApiEr
                 0
             ) AS error_count
         FROM runs r
+        LEFT JOIN machines m ON m.id = r.machine_id
         LEFT JOIN import_files i ON i.run_id = r.id
+        WHERE (?1 IS NULL OR r.machine_id = ?1)
         ORDER BY COALESCE(r.started_at, r.created_at) DESC, r.id DESC
         LIMIT 100
         "#,
     )
+    .bind(query.machine_id)
     .fetch_all(&state.pool)
     .await?;
 
@@ -443,6 +526,9 @@ async fn run_detail(
         r#"
         SELECT
             r.id,
+            r.machine_id,
+            m.name AS machine_name,
+            m.code AS machine_code,
             r.name,
             r.source_kind,
             r.source_name,
@@ -473,6 +559,7 @@ async fn run_detail(
                 0
             ) AS error_count
         FROM runs r
+        LEFT JOIN machines m ON m.id = r.machine_id
         LEFT JOIN import_files i ON i.run_id = r.id
         WHERE r.id = ?1
         "#,
@@ -976,6 +1063,9 @@ async fn fetch_run_summary(pool: &SqlitePool, id: i64) -> Result<RunSummary, Api
         r#"
         SELECT
             r.id,
+            r.machine_id,
+            m.name AS machine_name,
+            m.code AS machine_code,
             r.name,
             r.source_kind,
             r.source_name,
@@ -1006,6 +1096,7 @@ async fn fetch_run_summary(pool: &SqlitePool, id: i64) -> Result<RunSummary, Api
                 0
             ) AS error_count
         FROM runs r
+        LEFT JOIN machines m ON m.id = r.machine_id
         LEFT JOIN import_files i ON i.run_id = r.id
         WHERE r.id = ?1
         "#,

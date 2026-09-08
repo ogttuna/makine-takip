@@ -1,15 +1,24 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  createMachine,
+  fetchMachines,
   fetchQualityEvents,
   fetchRunAnalysis,
   fetchRunSamples,
   fetchRuns,
   getCollectorUrl,
   uploadCsv,
+  type CreateMachinePayload,
+  type ImportReport,
+  type MachineSummary,
+  type SampleFrame,
 } from "./api";
-import type { ImportReport, SampleFrame } from "./api";
+import {
+  samplesForChartRange,
+  segmentsForVisibleSamples,
+} from "./chartTimeRange";
 import { getChannelConfig } from "./channelConfig";
 import { ChartState } from "./components/StatusViews";
 import { AnalysisSummary } from "./features/analysis/AnalysisSummary";
@@ -23,26 +32,24 @@ import {
   getRawChannelCodes,
   withDerivedChannels,
 } from "./features/charts/channelSelection";
+import { LiveSnapshot } from "./features/dashboard/LiveSnapshot";
 import { ImportPanel } from "./features/import/ImportPanel";
+import { MachineRail } from "./features/machines/MachineRail";
 import { QualitySummary } from "./features/quality/QualitySummary";
 import { ProcessHeader } from "./features/runs/ProcessHeader";
 import { RunActions } from "./features/runs/RunActions";
 import { RunList } from "./features/runs/RunList";
-import { CsvTailPanel } from "./features/source/CsvTailPanel";
 import { DEFAULT_LOCALE, getCopy, type Locale } from "./i18n";
-import {
-  samplesForChartRange,
-  segmentsForVisibleSamples,
-} from "./chartTimeRange";
 import { lastSourceSequence, mergeIncrementalSamples } from "./incrementalSamples";
-import {
-  type ChartLayout,
-  type ChartTimeRange,
-  type InspectorTab,
-  type QualityFilter,
-  type ThemeMode,
+import type {
+  ChartLayout,
+  ChartTimeRange,
+  InspectorTab,
+  QualityFilter,
+  ThemeMode,
 } from "./types";
-import { useBrowserCsvTail } from "./useBrowserCsvTail";
+import type { BrowserCsvTailState } from "./useBrowserCsvTail";
+import { formatDate } from "./utils/format";
 
 const THEME_STORAGE_KEY = "freezedry.theme";
 const LOCALE_STORAGE_KEY = "freezedry.locale";
@@ -51,8 +58,12 @@ const MAX_VISIBLE_SAMPLES = 5_000;
 
 export function App() {
   const queryClient = useQueryClient();
+  const [selectedMachineId, setSelectedMachineId] = useState<number | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
-  const [chartLayout, setChartLayout] = useState<ChartLayout>("overlay");
+  const [machineRuntime, setMachineRuntime] = useState<
+    Record<number, BrowserCsvTailState>
+  >({});
+  const [chartLayout, setChartLayout] = useState<ChartLayout>("dashboard");
   const [chartTimeRange, setChartTimeRange] = useState<ChartTimeRange>("24h");
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => initialThemeMode());
   const [locale, setLocale] = useState<Locale>(() => initialLocale());
@@ -63,33 +74,24 @@ export function App() {
   const [lastImportReport, setLastImportReport] = useState<ImportReport | null>(null);
   const [followLive, setFollowLive] = useState(true);
   const operationsMenuRef = useRef<HTMLDivElement>(null);
-  const browserTail = useBrowserCsvTail({
-    onSynced: (runId, insertedCount, rejectedCount) => {
-      if (runId !== null) {
-        if (followLive) {
-          setSelectedRunId(runId);
-        }
-        void queryClient.invalidateQueries({ queryKey: ["runs"] });
-      }
 
-      if (runId !== null && insertedCount > 0) {
-        void queryClient.invalidateQueries({ queryKey: ["run-samples", runId] });
-      }
-
-      if (runId !== null && insertedCount + rejectedCount > 0) {
-        void queryClient.invalidateQueries({
-          queryKey: ["run-quality-events", runId],
-        });
-        void queryClient.invalidateQueries({
-          queryKey: ["run-analysis", runId],
-        });
-      }
-    },
+  const machinesQuery = useQuery({
+    queryKey: ["machines"],
+    queryFn: fetchMachines,
+    refetchInterval: LIVE_REFETCH_INTERVAL_MS,
   });
-
+  const selectedMachine = useMemo(
+    () =>
+      machinesQuery.data?.find((machine) => machine.id === selectedMachineId) ?? null,
+    [machinesQuery.data, selectedMachineId],
+  );
+  const selectedRuntime = selectedMachineId
+    ? machineRuntime[selectedMachineId] ?? null
+    : null;
   const runsQuery = useQuery({
-    queryKey: ["runs"],
-    queryFn: fetchRuns,
+    queryKey: ["runs", selectedMachineId],
+    queryFn: () => fetchRuns(selectedMachineId!),
+    enabled: selectedMachineId !== null,
     refetchInterval: LIVE_REFETCH_INTERVAL_MS,
   });
   const selectedRun = useMemo(
@@ -129,24 +131,35 @@ export function App() {
     enabled: selectedRunId !== null,
     refetchInterval: selectedRunIsLive ? LIVE_REFETCH_INTERVAL_MS : false,
   });
+  const createMachineMutation = useMutation({
+    mutationFn: createMachine,
+    onSuccess: async (machine) => {
+      setSelectedMachineId(machine.id);
+      setSelectedRunId(null);
+      setFollowLive(true);
+      await queryClient.invalidateQueries({ queryKey: ["machines"] });
+    },
+  });
   const importMutation = useMutation({
-    mutationFn: uploadCsv,
+    mutationFn: ({ file, machineId }: { file: File; machineId: number }) =>
+      uploadCsv(file, machineId),
     onSuccess: async (report) => {
       setLastImportReport(report);
       setFollowLive(false);
       setSelectedRunId(report.run_id);
       setInspectorTab("quality");
-      setOperationsMenuOpen(true);
-      await queryClient.invalidateQueries({ queryKey: ["runs"] });
-      await queryClient.invalidateQueries({ queryKey: ["run-samples", report.run_id] });
-      await queryClient.invalidateQueries({
-        queryKey: ["run-quality-events", report.run_id],
-      });
-      await queryClient.invalidateQueries({
-        queryKey: ["run-analysis", report.run_id],
-      });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["machines"] }),
+        queryClient.invalidateQueries({ queryKey: ["runs", selectedMachineId] }),
+        queryClient.invalidateQueries({ queryKey: ["run-samples", report.run_id] }),
+        queryClient.invalidateQueries({
+          queryKey: ["run-quality-events", report.run_id],
+        }),
+        queryClient.invalidateQueries({ queryKey: ["run-analysis", report.run_id] }),
+      ]);
     },
   });
+
   const samples = samplesQuery.data ?? [];
   const qualityEvents = qualityEventsQuery.data ?? [];
   const analysis = analysisQuery.data ?? null;
@@ -155,12 +168,7 @@ export function App() {
     [chartTimeRange, samples],
   );
   const chartProcessSegments = useMemo(
-    () =>
-      segmentsForVisibleSamples(
-        analysis?.segments ?? [],
-        chartSamples,
-        chartTimeRange,
-      ),
+    () => segmentsForVisibleSamples(analysis?.segments ?? [], chartSamples, chartTimeRange),
     [analysis?.segments, chartSamples, chartTimeRange],
   );
   const copy = getCopy(locale);
@@ -175,63 +183,86 @@ export function App() {
   const activeVisibleChannels = visibleChannels.filter((channel) =>
     channelCodes.includes(channel),
   );
+  const runtimeScanning = Object.values(machineRuntime).some(
+    (runtime) => runtime.status === "scanning",
+  );
   const isRefreshing =
+    machinesQuery.isFetching ||
     runsQuery.isFetching ||
     samplesQuery.isFetching ||
     qualityEventsQuery.isFetching ||
     analysisQuery.isFetching ||
-    browserTail.state.status === "scanning";
+    runtimeScanning;
+
+  const handleRuntimeChange = useCallback(
+    (machineId: number, state: BrowserCsvTailState) => {
+      setMachineRuntime((current) => ({ ...current, [machineId]: state }));
+    },
+    [],
+  );
+  const handleMachineSync = useCallback(
+    (
+      machineId: number,
+      runId: number | null,
+      insertedCount: number,
+      rejectedCount: number,
+    ) => {
+      void queryClient.invalidateQueries({ queryKey: ["machines"] });
+      void queryClient.invalidateQueries({ queryKey: ["runs", machineId] });
+
+      if (runId !== null && machineId === selectedMachineId && followLive) {
+        setSelectedRunId(runId);
+      }
+      if (runId !== null && insertedCount > 0) {
+        void queryClient.invalidateQueries({ queryKey: ["run-samples", runId] });
+      }
+      if (runId !== null && insertedCount + rejectedCount > 0) {
+        void queryClient.invalidateQueries({ queryKey: ["run-quality-events", runId] });
+        void queryClient.invalidateQueries({ queryKey: ["run-analysis", runId] });
+      }
+    },
+    [followLive, queryClient, selectedMachineId],
+  );
 
   useEffect(() => {
-    const activeRunId = browserTail.state.activeRunId;
-
-    if (!followLive || activeRunId === null || activeRunId === undefined) {
+    const machines = machinesQuery.data ?? [];
+    if (machines.length === 0) {
+      setSelectedMachineId(null);
       return;
     }
-
-    if (!(runsQuery.data ?? []).some((run) => run.id === activeRunId)) {
-      void queryClient.invalidateQueries({ queryKey: ["runs"] });
-      return;
+    if (
+      selectedMachineId === null ||
+      !machines.some((machine) => machine.id === selectedMachineId)
+    ) {
+      setSelectedMachineId(machines[0].id);
     }
-
-    if (selectedRunId !== activeRunId) {
-      setSelectedRunId(activeRunId);
-    }
-  }, [
-    browserTail.state.activeRunId,
-    followLive,
-    queryClient,
-    runsQuery.data,
-    selectedRunId,
-  ]);
+  }, [machinesQuery.data, selectedMachineId]);
 
   useEffect(() => {
     const runs = runsQuery.data ?? [];
-
     if (runs.length === 0) {
       setSelectedRunId(null);
       return;
     }
 
+    const liveRunId = selectedRuntime?.activeRunId ?? selectedMachine?.active_run_id;
+    if (followLive && liveRunId && runs.some((run) => run.id === liveRunId)) {
+      setSelectedRunId(liveRunId);
+      return;
+    }
     if (selectedRunId === null || !runs.some((run) => run.id === selectedRunId)) {
       setSelectedRunId(runs[0].id);
     }
-  }, [runsQuery.data, selectedRunId]);
+  }, [followLive, runsQuery.data, selectedMachine?.active_run_id, selectedRunId, selectedRuntime?.activeRunId]);
 
   useEffect(() => {
     if (channelCodes.length === 0) {
       setVisibleChannels([]);
       return;
     }
-
     setVisibleChannels((current) => {
       const filtered = current.filter((channel) => channelCodes.includes(channel));
-
-      if (filtered.length === 0) {
-        return channelCodes;
-      }
-
-      return filtered;
+      return filtered.length === 0 ? channelCodes : filtered;
     });
   }, [channelCodes]);
 
@@ -243,27 +274,22 @@ export function App() {
     if (!isOperationsMenuOpen) {
       return;
     }
-
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setOperationsMenuOpen(false);
       }
     };
     const closeOnOutsidePointer = (event: PointerEvent) => {
-      const target = event.target;
-
       if (
-        target instanceof Node &&
+        event.target instanceof Node &&
         operationsMenuRef.current &&
-        !operationsMenuRef.current.contains(target)
+        !operationsMenuRef.current.contains(event.target)
       ) {
         setOperationsMenuOpen(false);
       }
     };
-
     document.addEventListener("keydown", closeOnEscape);
     document.addEventListener("pointerdown", closeOnOutsidePointer);
-
     return () => {
       document.removeEventListener("keydown", closeOnEscape);
       document.removeEventListener("pointerdown", closeOnOutsidePointer);
@@ -273,57 +299,89 @@ export function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = themeMode;
     document.documentElement.style.colorScheme = themeMode;
-
     try {
       window.localStorage.setItem(THEME_STORAGE_KEY, themeMode);
     } catch {
-      // Theme persistence is optional; the UI still works if storage is blocked.
+      // The selected theme still applies for this page view.
     }
   }, [themeMode]);
 
   useEffect(() => {
     document.documentElement.lang = locale;
-
     try {
       window.localStorage.setItem(LOCALE_STORAGE_KEY, locale);
     } catch {
-      // Locale persistence is optional; the UI still works if storage is blocked.
+      // The selected locale still applies for this page view.
     }
   }, [locale]);
 
-  const sourceLabel = runsQuery.isError
+  const sourceLabel = machinesQuery.isError
     ? copy.connection.error
     : isRefreshing
       ? copy.connection.syncing
       : copy.connection.connected;
   const refreshData = async () => {
-    await browserTail.rescan();
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["runs"] }),
+      queryClient.invalidateQueries({ queryKey: ["machines"] }),
+      queryClient.invalidateQueries({ queryKey: ["runs", selectedMachineId] }),
     ]);
-
     if (selectedRunId !== null) {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["run-samples", selectedRunId] }),
         queryClient.invalidateQueries({
           queryKey: ["run-quality-events", selectedRunId],
         }),
-        queryClient.invalidateQueries({
-          queryKey: ["run-analysis", selectedRunId],
-        }),
+        queryClient.invalidateQueries({ queryKey: ["run-analysis", selectedRunId] }),
       ]);
     }
   };
 
   return (
-    <main className="app-shell">
+    <div className="app-shell">
+      <a className="skip-link" href="#main-content">
+        {locale === "en" ? "Skip to process" : "Prosese geç"}
+      </a>
       <header className="topbar">
-        <div className="topbar-title">
-          <p className="eyebrow">{copy.app.eyebrow}</p>
-          <h1>{copy.app.title}</h1>
-          <p>{copy.app.subtitle}</p>
+        <div className="brand-block">
+          <div className="brand-mark" aria-hidden="true">
+            <span>FD</span>
+            <b>°</b>
+          </div>
+          <div className="topbar-title">
+            <p className="eyebrow">{copy.app.eyebrow}</p>
+            <h1>{copy.app.title}</h1>
+            <p>{copy.app.subtitle}</p>
+          </div>
         </div>
+
+        <FleetPulse
+          locale={locale}
+          machines={machinesQuery.data ?? []}
+          runtime={machineRuntime}
+        />
+
         <div className="topbar-actions">
+          <div className="connection-strip" aria-busy={isRefreshing}>
+            <div className="connection-state">
+              <span
+                aria-hidden="true"
+                className={machinesQuery.isError ? "status-dot" : "status-dot online"}
+              />
+              <span>
+                <strong>{sourceLabel}</strong>
+                <small>{getCollectorUrl().replace(/^https?:\/\//, "")}</small>
+              </span>
+            </div>
+            <button
+              aria-label={copy.connection.refresh}
+              className="refresh-button"
+              disabled={isRefreshing}
+              onClick={() => void refreshData()}
+              type="button"
+            >
+              ↻
+            </button>
+          </div>
           <ThemeToggle
             copy={copy.theme}
             themeMode={themeMode}
@@ -331,29 +389,7 @@ export function App() {
               setThemeMode((current) => (current === "dark" ? "light" : "dark"))
             }
           />
-          <LanguageToggle
-            copy={copy.language}
-            locale={locale}
-            onChange={setLocale}
-          />
-          <div className="connection-strip" aria-busy={isRefreshing}>
-            <div className="connection-state">
-              <span
-                aria-hidden="true"
-                className={runsQuery.isError ? "status-dot" : "status-dot online"}
-              />
-              <strong>{sourceLabel}</strong>
-              <span>{getCollectorUrl().replace(/^https?:\/\//, "")}</span>
-            </div>
-            <button
-              className="ghost-button"
-              disabled={isRefreshing}
-              onClick={refreshData}
-              type="button"
-            >
-              {copy.connection.refresh}
-            </button>
-          </div>
+          <LanguageToggle copy={copy.language} locale={locale} onChange={setLocale} />
           <div className="operations-menu-shell" ref={operationsMenuRef}>
             <button
               aria-expanded={isOperationsMenuOpen}
@@ -380,7 +416,10 @@ export function App() {
                 <div className="operations-menu-header">
                   <div>
                     <strong>{copy.operations.title}</strong>
-                    <span>{selectedRun?.name ?? copy.operations.noRun}</span>
+                    <span>
+                      {selectedMachine?.name ?? copy.operations.noRun}
+                      {selectedRun ? ` · ${selectedRun.name}` : ""}
+                    </span>
                   </div>
                   <button
                     className="ghost-button compact"
@@ -392,26 +431,16 @@ export function App() {
                 </div>
 
                 <div className="inspector-tabs" role="tablist" aria-label={copy.operations.tabLabel}>
-                  <InspectorTabButton
-                    active={inspectorTab === "quality"}
-                    label={copy.operations.tabs.quality}
-                    onClick={() => setInspectorTab("quality")}
-                  />
-                  <InspectorTabButton
-                    active={inspectorTab === "analysis"}
-                    label={copy.operations.tabs.analysis}
-                    onClick={() => setInspectorTab("analysis")}
-                  />
-                  <InspectorTabButton
-                    active={inspectorTab === "runs"}
-                    label={copy.operations.tabs.runs}
-                    onClick={() => setInspectorTab("runs")}
-                  />
-                  <InspectorTabButton
-                    active={inspectorTab === "source"}
-                    label={copy.operations.tabs.source}
-                    onClick={() => setInspectorTab("source")}
-                  />
+                  {(["quality", "analysis", "runs", "source"] as InspectorTab[]).map(
+                    (tab) => (
+                      <InspectorTabButton
+                        active={inspectorTab === tab}
+                        key={tab}
+                        label={copy.operations.tabs[tab]}
+                        onClick={() => setInspectorTab(tab)}
+                      />
+                    ),
+                  )}
                 </div>
 
                 {inspectorTab === "quality" ? (
@@ -424,10 +453,9 @@ export function App() {
                     locale={locale}
                     onFilterChange={setQualityFilter}
                     onRetry={() => qualityEventsQuery.refetch()}
-                    visibleLimit={2}
+                    visibleLimit={5}
                   />
                 ) : null}
-
                 {inspectorTab === "analysis" ? (
                   <AnalysisSummary
                     analysis={analysis}
@@ -438,7 +466,6 @@ export function App() {
                     onRetry={() => analysisQuery.refetch()}
                   />
                 ) : null}
-
                 {inspectorTab === "runs" ? (
                   <div className="operations-panel-section">
                     <div className="section-heading compact">
@@ -455,7 +482,6 @@ export function App() {
                       onSelect={(runId) => {
                         setFollowLive(false);
                         setSelectedRunId(runId);
-                        setInspectorTab("quality");
                         setOperationsMenuOpen(false);
                       }}
                       onRetry={() => runsQuery.refetch()}
@@ -464,22 +490,13 @@ export function App() {
                     />
                   </div>
                 ) : null}
-
                 {inspectorTab === "source" ? (
-                  <div className="operations-panel-section">
-                    <CsvTailPanel
-                      copy={copy.csvTail}
+                  <div className="operations-panel-section source-operations">
+                    <SourceStatus
+                      copy={copy.fleet}
                       locale={locale}
-                      onChoose={browserTail.chooseDirectory}
-                      onFollowActive={(runId) => {
-                        setFollowLive(true);
-                        setSelectedRunId(runId);
-                        setOperationsMenuOpen(false);
-                      }}
-                      onRescan={browserTail.rescan}
-                      onResume={browserTail.resume}
-                      onStop={browserTail.stop}
-                      state={browserTail.state}
+                      machine={selectedMachine}
+                      state={selectedRuntime}
                     />
                     <RunActions copy={copy.source} locale={locale} run={selectedRun} />
                     <ImportPanel
@@ -487,7 +504,11 @@ export function App() {
                       error={importMutation.error}
                       isPending={importMutation.isPending}
                       lastReport={lastImportReport}
-                      onUpload={(file) => importMutation.mutate(file)}
+                      onUpload={(file) => {
+                        if (selectedMachineId !== null) {
+                          importMutation.mutate({ file, machineId: selectedMachineId });
+                        }
+                      }}
                     />
                   </div>
                 ) : null}
@@ -497,100 +518,278 @@ export function App() {
         </div>
       </header>
 
-      <section className="workspace">
-        <div className="chart-panel">
-          <ProcessHeader
-            activeChannelCount={activeVisibleChannels.length}
-            copy={copy.process}
-            locale={locale}
-            qualityEvents={qualityEvents}
-            run={selectedRun}
-            samples={samples}
-            analysis={analysis}
-          />
+      <div className="control-room">
+        <MachineRail
+          copy={copy.fleet}
+          createError={createMachineMutation.error}
+          error={machinesQuery.error}
+          isCreating={createMachineMutation.isPending}
+          isLoading={machinesQuery.isLoading}
+          locale={locale}
+          machines={machinesQuery.data ?? []}
+          onCreate={async (payload: CreateMachinePayload) => {
+            await createMachineMutation.mutateAsync(payload);
+          }}
+          onRetry={() => void machinesQuery.refetch()}
+          onRuntimeChange={handleRuntimeChange}
+          onSelect={(machineId) => {
+            setSelectedMachineId(machineId);
+            setSelectedRunId(null);
+            setFollowLive(true);
+          }}
+          onSynced={handleMachineSync}
+          selectedMachineId={selectedMachineId}
+        />
 
-          <div className="section-heading chart-heading">
-            <div className="chart-heading-copy">
-              <h2>{copy.chart.title}</h2>
-              <p>{copy.chart.subtitle}</p>
-              {samples.length > 0 ? (
-                <div className="chart-context" aria-live="polite">
-                  <span>
-                    {copy.chart.visibleSamples(
-                      chartSamples.length,
-                      selectedRun?.row_count ?? samples.length,
-                    )}
-                  </span>
-                  {selectedRunId === browserTail.state.activeRunId &&
-                  browserTail.state.activeFileName ? (
-                    <span title={browserTail.state.activeFileName}>
-                      {copy.chart.activeFile(browserTail.state.activeFileName)}
-                    </span>
-                  ) : null}
+        <main className="workspace" id="main-content">
+          {selectedMachine ? (
+            <>
+              <MachineMasthead
+                copy={copy}
+                locale={locale}
+                machine={selectedMachine}
+                onRunChange={(runId) => {
+                  setFollowLive(false);
+                  setSelectedRunId(runId);
+                }}
+                runs={runsQuery.data ?? []}
+                selectedRunId={selectedRunId}
+                state={selectedRuntime}
+              />
+
+              <ProcessHeader
+                activeChannelCount={activeVisibleChannels.length}
+                analysis={analysis}
+                copy={copy.process}
+                locale={locale}
+                qualityEvents={qualityEvents}
+                run={selectedRun}
+                samples={samples}
+              />
+
+              <LiveSnapshot copy={copy.snapshot} locale={locale} samples={samples} />
+
+              <section className="chart-panel">
+                <div className="section-heading chart-heading">
+                  <div className="chart-heading-copy">
+                    <p className="section-index">
+                      {locale === "en" ? "02 / TELEMETRY" : "02 / TELEMETRİ"}
+                    </p>
+                    <h2>{copy.chart.title}</h2>
+                    <p>{copy.chart.subtitle}</p>
+                    {samples.length > 0 ? (
+                      <div className="chart-context" aria-live="polite">
+                        <span>
+                          {copy.chart.visibleSamples(
+                            chartSamples.length,
+                            selectedRun?.row_count ?? samples.length,
+                          )}
+                        </span>
+                        {selectedRuntime?.activeFileName &&
+                        selectedRunId === selectedRuntime.activeRunId ? (
+                          <span title={selectedRuntime.activeFileName}>
+                            {copy.chart.activeFile(selectedRuntime.activeFileName)}
+                          </span>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                  <ChartViewControls
+                    chartLayout={chartLayout}
+                    chartTimeRange={chartTimeRange}
+                    copy={copy.chart}
+                    onChartLayoutChange={setChartLayout}
+                    onChartTimeRangeChange={setChartTimeRange}
+                  />
                 </div>
-              ) : null}
-            </div>
-            <ChartViewControls
-              chartLayout={chartLayout}
-              chartTimeRange={chartTimeRange}
-              copy={copy.chart}
-              onChartLayoutChange={setChartLayout}
-              onChartTimeRangeChange={setChartTimeRange}
-            />
-          </div>
 
-          <UnitNote
-            copy={copy.chart}
-            locale={locale}
-            pendingChannels={pendingUnitChannels}
-          />
+                <UnitNote
+                  copy={copy.chart}
+                  locale={locale}
+                  pendingChannels={pendingUnitChannels}
+                />
+                <ChannelControls
+                  channels={channelCodes}
+                  copy={copy.chart}
+                  locale={locale}
+                  onChange={setVisibleChannels}
+                  visibleChannels={activeVisibleChannels}
+                />
 
-          <ChannelControls
-            channels={channelCodes}
-            copy={copy.chart}
-            locale={locale}
-            visibleChannels={activeVisibleChannels}
-            onChange={setVisibleChannels}
-          />
-
-          {samplesQuery.isLoading ? (
-            <ChartState
-              message={copy.chart.states.runLoadingMessage}
-              title={copy.chart.states.runLoadingTitle}
-            />
-          ) : samplesQuery.isError ? (
-            <ChartState
-              actionLabel={copy.common.retry}
-              message={samplesQuery.error.message}
-              onAction={() => samplesQuery.refetch()}
-              tone="error"
-              title={copy.chart.states.samplesErrorTitle}
-            />
-          ) : samples.length === 0 ? (
-            <ChartState
-              message={copy.chart.states.emptyMessage}
-              title={copy.chart.states.emptyTitle}
-            />
-          ) : activeVisibleChannels.length === 0 ? (
-            <ChartState
-              message={copy.chart.states.noChannelMessage}
-              title={copy.chart.states.noChannelTitle}
-            />
+                {samplesQuery.isLoading ? (
+                  <ChartState
+                    message={copy.chart.states.runLoadingMessage}
+                    title={copy.chart.states.runLoadingTitle}
+                  />
+                ) : samplesQuery.isError ? (
+                  <ChartState
+                    actionLabel={copy.common.retry}
+                    message={samplesQuery.error.message}
+                    onAction={() => samplesQuery.refetch()}
+                    tone="error"
+                    title={copy.chart.states.samplesErrorTitle}
+                  />
+                ) : samples.length === 0 ? (
+                  <ChartState
+                    message={copy.chart.states.emptyMessage}
+                    title={copy.chart.states.emptyTitle}
+                  />
+                ) : activeVisibleChannels.length === 0 ? (
+                  <ChartState
+                    message={copy.chart.states.noChannelMessage}
+                    title={copy.chart.states.noChannelTitle}
+                  />
+                ) : (
+                  <ChartArea
+                    copy={copy.chart}
+                    layout={chartLayout}
+                    locale={locale}
+                    processSegments={chartProcessSegments}
+                    qualityEvents={qualityEvents}
+                    samples={chartSamples}
+                    themeMode={themeMode}
+                    visibleChannels={activeVisibleChannels}
+                  />
+                )}
+              </section>
+            </>
           ) : (
-            <ChartArea
-              copy={copy.chart}
-              layout={chartLayout}
-              locale={locale}
-              qualityEvents={qualityEvents}
-              processSegments={chartProcessSegments}
-              samples={chartSamples}
-              themeMode={themeMode}
-              visibleChannels={activeVisibleChannels}
+            <ChartState
+              message={copy.fleet.empty}
+              title={copy.fleet.add}
             />
           )}
+        </main>
+      </div>
+    </div>
+  );
+}
+
+function FleetPulse({
+  locale,
+  machines,
+  runtime,
+}: {
+  locale: Locale;
+  machines: MachineSummary[];
+  runtime: Record<number, BrowserCsvTailState>;
+}) {
+  const live = machines.filter(
+    (machine) => runtime[machine.id]?.status === "tailing" || machine.active_run_id !== null,
+  ).length;
+  const issues = machines.reduce(
+    (total, machine) => total + machine.warning_count + machine.error_count,
+    0,
+  );
+
+  return (
+    <div className="fleet-pulse" aria-label={locale === "en" ? "Fleet status" : "Filo durumu"}>
+      <div>
+        <span>{locale === "en" ? "Fleet" : "Filo"}</span>
+        <strong>{machines.length.toString().padStart(2, "0")}</strong>
+      </div>
+      <div>
+        <span>{locale === "en" ? "Live" : "Canlı"}</span>
+        <strong>{live.toString().padStart(2, "0")}</strong>
+      </div>
+      <div className={issues > 0 ? "has-issues" : ""}>
+        <span>{locale === "en" ? "Alerts" : "Uyarı"}</span>
+        <strong>{issues.toString().padStart(2, "0")}</strong>
+      </div>
+    </div>
+  );
+}
+
+function MachineMasthead({
+  copy,
+  locale,
+  machine,
+  onRunChange,
+  runs,
+  selectedRunId,
+  state,
+}: {
+  copy: ReturnType<typeof getCopy>;
+  locale: Locale;
+  machine: MachineSummary;
+  onRunChange: (runId: number) => void;
+  runs: Awaited<ReturnType<typeof fetchRuns>>;
+  selectedRunId: number | null;
+  state: BrowserCsvTailState | null;
+}) {
+  const isLive = state?.status === "tailing" || machine.active_run_id !== null;
+
+  return (
+    <section className="machine-masthead">
+      <div className="machine-masthead-identity">
+        <p className="section-index">
+          {locale === "en" ? "01 / MACHINE" : "01 / MAKİNE"}
+        </p>
+        <div>
+          <h2>{machine.name}</h2>
+          <span>{machine.code}</span>
         </div>
-      </section>
-    </main>
+        <p>
+          {[machine.model, machine.location].filter(Boolean).join(" · ") || copy.fleet.noLocation}
+        </p>
+      </div>
+      <div className="machine-masthead-status">
+        <span className={isLive ? "status-dot online" : "status-dot idle"} />
+        <div>
+          <strong>{isLive ? copy.fleet.statuses.live : copy.fleet.statuses.paused}</strong>
+          <span>
+            {state?.lastSampledAt
+              ? formatDate(state.lastSampledAt, locale)
+              : machine.last_sampled_at
+                ? formatDate(machine.last_sampled_at, locale)
+                : copy.csvTail.noData}
+          </span>
+        </div>
+      </div>
+      <label className="run-select">
+        <span>{copy.process.selectedRun}</span>
+        <select
+          disabled={runs.length === 0}
+          onChange={(event) => onRunChange(Number(event.target.value))}
+          value={selectedRunId ?? ""}
+        >
+          {runs.length === 0 ? <option value="">{copy.process.noRun}</option> : null}
+          {runs.map((run) => (
+            <option key={run.id} value={run.id}>
+              {run.name} · {run.started_at ? formatDate(run.started_at, locale) : "—"}
+            </option>
+          ))}
+        </select>
+      </label>
+    </section>
+  );
+}
+
+function SourceStatus({
+  copy,
+  locale,
+  machine,
+  state,
+}: {
+  copy: ReturnType<typeof getCopy>["fleet"];
+  locale: Locale;
+  machine: MachineSummary | null;
+  state: BrowserCsvTailState | null;
+}) {
+  return (
+    <div className="source-status-summary">
+      <span>{locale === "en" ? "Selected machine" : "Seçili makine"}</span>
+      <strong>{machine?.name ?? "—"}</strong>
+      <p>
+        {state?.directoryName ??
+          (machine && machine.source_count > 0
+            ? copy.remoteSource
+            : locale === "en"
+              ? "No folder connected"
+              : "Klasör bağlı değil")}
+      </p>
+      {state?.activeFileName ? <code>{state.activeFileName}</code> : null}
+    </div>
   );
 }
 
@@ -604,7 +803,6 @@ function ThemeToggle({
   themeMode: ThemeMode;
 }) {
   const isDark = themeMode === "dark";
-
   return (
     <button
       aria-label={isDark ? copy.toLight : copy.toDark}
@@ -678,17 +876,14 @@ function initialThemeMode(): ThemeMode {
   if (typeof window === "undefined") {
     return "light";
   }
-
   try {
     const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
-
     if (storedTheme === "light" || storedTheme === "dark") {
       return storedTheme;
     }
   } catch {
     // Fall through to system preference.
   }
-
   return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
@@ -696,16 +891,13 @@ function initialLocale(): Locale {
   if (typeof window === "undefined") {
     return DEFAULT_LOCALE;
   }
-
   try {
     const storedLocale = window.localStorage.getItem(LOCALE_STORAGE_KEY);
-
     if (storedLocale === "tr" || storedLocale === "en") {
       return storedLocale;
     }
   } catch {
     // Fall through to the application default.
   }
-
   return DEFAULT_LOCALE;
 }

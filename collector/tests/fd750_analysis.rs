@@ -385,6 +385,7 @@ async fn create_run(pool: &sqlx::SqlitePool) -> i64 {
         pool,
         CreateRunRequest {
             name: "FD-750 analysis".to_string(),
+            machine_id: None,
             source_kind: "replay".to_string(),
             source_name: Some("test".to_string()),
             started_at: None,

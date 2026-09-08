@@ -1,5 +1,6 @@
 use collector::browser_tail::{
-    BrowserTailChunkRequest, BrowserTailOpenRequest, open_file, source_status, sync_chunk,
+    BrowserTailChunkRequest, BrowserTailOpenRequest, open_file, source_status, stop_source,
+    sync_chunk,
 };
 
 const SOURCE_ID: &str = "browser-test-source";
@@ -153,6 +154,43 @@ async fn advances_by_original_bytes_when_invalid_utf8_was_replaced_in_the_browse
     assert_eq!(response.status.byte_offset, opened.file_size);
 }
 
+#[tokio::test]
+async fn pauses_a_source_and_completes_its_run_only_when_the_folder_changes() {
+    let root = tempfile::tempdir().unwrap();
+    let pool = create_test_pool(root.path()).await;
+    let opened = open(&pool, "LogFile_2026_09_08.csv", 0).await;
+    let run_id = opened.active_run_id.unwrap();
+
+    assert_eq!(
+        stop_source(&pool, SOURCE_ID, false).await.unwrap(),
+        Some(run_id)
+    );
+    assert_eq!(browser_source_enabled(&pool).await, 0);
+    assert_eq!(run_status(&pool, run_id).await, "running");
+    assert_eq!(
+        collector::fleet::list_machines(&pool).await.unwrap()[0].active_run_id,
+        None
+    );
+
+    let resumed = open(&pool, "LogFile_2026_09_08.csv", 0).await;
+    assert_eq!(resumed.active_run_id, Some(run_id));
+    assert_eq!(browser_source_enabled(&pool).await, 1);
+    assert_eq!(
+        collector::fleet::list_machines(&pool).await.unwrap()[0].active_run_id,
+        Some(run_id)
+    );
+
+    assert_eq!(
+        stop_source(&pool, SOURCE_ID, true).await.unwrap(),
+        Some(run_id)
+    );
+    assert_eq!(run_status(&pool, run_id).await, "completed");
+    assert_eq!(
+        source_status(&pool, SOURCE_ID).await.unwrap().active_run_id,
+        None
+    );
+}
+
 async fn open(
     pool: &sqlx::SqlitePool,
     file_name: &str,
@@ -172,6 +210,7 @@ async fn open_with_header(
         pool,
         BrowserTailOpenRequest {
             source_id: SOURCE_ID.to_string(),
+            machine_id: None,
             source_name: "MachineLogs".to_string(),
             file_name: file_name.to_string(),
             header_line: header_line.to_string(),
@@ -231,6 +270,14 @@ async fn frame_count(pool: &sqlx::SqlitePool, run_id: i64) -> i64 {
 async fn run_status(pool: &sqlx::SqlitePool, run_id: i64) -> String {
     sqlx::query_scalar("SELECT status FROM runs WHERE id = ?1")
         .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn browser_source_enabled(pool: &sqlx::SqlitePool) -> i64 {
+    sqlx::query_scalar("SELECT enabled FROM browser_tail_sources WHERE source_id = ?1")
+        .bind(SOURCE_ID)
         .fetch_one(pool)
         .await
         .unwrap()

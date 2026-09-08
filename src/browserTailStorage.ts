@@ -1,66 +1,87 @@
 const DATABASE_NAME = "freezedry-browser-tail";
 const STORE_NAME = "handles";
-const DIRECTORY_HANDLE_KEY = "machine-csv-directory";
-const SOURCE_ID_KEY = "freezedry.browserTail.sourceId";
-const ENABLED_KEY = "freezedry.browserTail.enabled";
+const LEGACY_DIRECTORY_HANDLE_KEY = "machine-csv-directory";
+const DIRECTORY_HANDLE_PREFIX = "machine-csv-directory";
+const SOURCE_ID_PREFIX = "freezedry.browserTail.sourceId";
+const ENABLED_PREFIX = "freezedry.browserTail.enabled";
 
-export async function saveDirectoryHandle(handle: FileSystemDirectoryHandle): Promise<void> {
+export async function saveDirectoryHandle(
+  machineId: number,
+  handle: FileSystemDirectoryHandle,
+): Promise<void> {
   const database = await openDatabase();
   await requestAsPromise(
-    database.transaction(STORE_NAME, "readwrite").objectStore(STORE_NAME).put(handle, DIRECTORY_HANDLE_KEY),
+    database
+      .transaction(STORE_NAME, "readwrite")
+      .objectStore(STORE_NAME)
+      .put(handle, directoryHandleKey(machineId)),
   );
   database.close();
 }
 
-export async function loadDirectoryHandle(): Promise<FileSystemDirectoryHandle | null> {
+export async function loadDirectoryHandle(
+  machineId: number,
+): Promise<FileSystemDirectoryHandle | null> {
   try {
     const database = await openDatabase();
-    const handle = await requestAsPromise<FileSystemDirectoryHandle | undefined>(
-      database.transaction(STORE_NAME, "readonly").objectStore(STORE_NAME).get(DIRECTORY_HANDLE_KEY),
-    );
+    const scopedHandle = await readDirectoryHandle(database, directoryHandleKey(machineId));
+    const legacyHandle =
+      scopedHandle ??
+      (machineId === 1
+        ? await readDirectoryHandle(database, LEGACY_DIRECTORY_HANDLE_KEY)
+        : undefined);
     database.close();
-    return handle ?? null;
+    return legacyHandle ?? null;
   } catch {
     return null;
   }
 }
 
-export function browserTailSourceId(): string {
+export function browserTailSourceId(machineId: number): string {
+  const key = scopedKey(SOURCE_ID_PREFIX, machineId);
+
   try {
-    const stored = window.localStorage.getItem(SOURCE_ID_KEY);
-    if (stored) {
-      return stored;
+    const scoped = window.localStorage.getItem(key);
+    if (scoped) {
+      return scoped;
     }
 
-    const id = createSourceId();
-    window.localStorage.setItem(SOURCE_ID_KEY, id);
+    const legacy =
+      machineId === 1 ? window.localStorage.getItem(SOURCE_ID_PREFIX) : null;
+    const id = legacy || createSourceId();
+    window.localStorage.setItem(key, id);
     return id;
   } catch {
     return createSourceId();
   }
 }
 
-export function createNewBrowserTailSourceId(): string {
+export function createNewBrowserTailSourceId(machineId: number): string {
   const id = createSourceId();
   try {
-    window.localStorage.setItem(SOURCE_ID_KEY, id);
+    window.localStorage.setItem(scopedKey(SOURCE_ID_PREFIX, machineId), id);
   } catch {
     // The generated ID remains valid for the current tab.
   }
   return id;
 }
 
-export function isBrowserTailEnabled(): boolean {
+export function isBrowserTailEnabled(machineId: number): boolean {
   try {
-    return window.localStorage.getItem(ENABLED_KEY) === "true";
+    const scoped = window.localStorage.getItem(scopedKey(ENABLED_PREFIX, machineId));
+    if (scoped !== null) {
+      return scoped === "true";
+    }
+
+    return machineId === 1 && window.localStorage.getItem(ENABLED_PREFIX) === "true";
   } catch {
     return false;
   }
 }
 
-export function setBrowserTailEnabled(enabled: boolean): void {
+export function setBrowserTailEnabled(machineId: number, enabled: boolean): void {
   try {
-    window.localStorage.setItem(ENABLED_KEY, String(enabled));
+    window.localStorage.setItem(scopedKey(ENABLED_PREFIX, machineId), String(enabled));
   } catch {
     // Persistence is best-effort. The current tab still keeps scanning.
   }
@@ -77,6 +98,23 @@ function createSourceId(): string {
   return `browser-${random}`;
 }
 
+function directoryHandleKey(machineId: number): string {
+  return scopedKey(DIRECTORY_HANDLE_PREFIX, machineId);
+}
+
+function scopedKey(prefix: string, machineId: number): string {
+  return `${prefix}.${machineId}`;
+}
+
+function readDirectoryHandle(
+  database: IDBDatabase,
+  key: string,
+): Promise<FileSystemDirectoryHandle | undefined> {
+  return requestAsPromise<FileSystemDirectoryHandle | undefined>(
+    database.transaction(STORE_NAME, "readonly").objectStore(STORE_NAME).get(key),
+  );
+}
+
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DATABASE_NAME, 1);
@@ -87,13 +125,15 @@ function openDatabase(): Promise<IDBDatabase> {
       }
     };
     request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error("Browser storage could not open"));
+    request.onerror = () =>
+      reject(request.error ?? new Error("Browser storage could not open"));
   });
 }
 
 function requestAsPromise<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error("Browser storage request failed"));
+    request.onerror = () =>
+      reject(request.error ?? new Error("Browser storage request failed"));
   });
 }

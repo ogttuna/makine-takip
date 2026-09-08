@@ -700,9 +700,19 @@ pub async fn import_csv_bytes(
     file_name: impl Into<String>,
     bytes: &[u8],
 ) -> anyhow::Result<ImportReport> {
-    let parsed = parse_csv_bytes(file_name, bytes)?;
+    import_csv_bytes_for_machine(pool, file_name, bytes, None).await
+}
 
-    if let Some(report) = duplicate_report(pool, &parsed.file_sha256).await? {
+pub async fn import_csv_bytes_for_machine(
+    pool: &SqlitePool,
+    file_name: impl Into<String>,
+    bytes: &[u8],
+    requested_machine_id: Option<i64>,
+) -> anyhow::Result<ImportReport> {
+    let parsed = parse_csv_bytes(file_name, bytes)?;
+    let machine_id = crate::fleet::resolve_machine_id(pool, requested_machine_id).await?;
+
+    if let Some(report) = duplicate_report(pool, &parsed.file_sha256, machine_id).await? {
         if let Err(error) = crate::analysis::analyze_run(pool, report.run_id).await {
             tracing::warn!(run_id = report.run_id, %error, "failed to refresh FD-750 analysis");
         }
@@ -712,12 +722,13 @@ pub async fn import_csv_bytes(
     let mut tx = pool.begin().await?;
     let run_id: i64 = sqlx::query_scalar(
         r#"
-        INSERT INTO runs (name, source_kind, source_name, started_at, finished_at, status)
-        VALUES (?1, 'csv_import', ?2, ?3, ?4, 'imported')
+        INSERT INTO runs (name, machine_id, source_kind, source_name, started_at, finished_at, status)
+        VALUES (?1, ?2, 'csv_import', ?3, ?4, ?5, 'imported')
         RETURNING id
         "#,
     )
     .bind(&parsed.file_name)
+    .bind(machine_id)
     .bind(&parsed.file_name)
     .bind(&parsed.started_at)
     .bind(&parsed.finished_at)
@@ -874,6 +885,7 @@ pub async fn import_csv_bytes(
         r#"
         INSERT INTO import_files (
             run_id,
+            machine_id,
             file_name,
             file_sha256,
             row_count,
@@ -881,11 +893,12 @@ pub async fn import_csv_bytes(
             error_count,
             parser_version
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
         RETURNING id
         "#,
     )
     .bind(run_id)
+    .bind(machine_id)
     .bind(&parsed.file_name)
     .bind(&parsed.file_sha256)
     .bind(parsed.frames.len() as i64)
@@ -919,6 +932,7 @@ pub async fn import_csv_bytes(
 async fn duplicate_report(
     pool: &SqlitePool,
     file_sha256: &str,
+    machine_id: i64,
 ) -> anyhow::Result<Option<ImportReport>> {
     let Some(row) = sqlx::query(
         r#"
@@ -937,11 +951,12 @@ async fn duplicate_report(
         JOIN runs r ON r.id = i.run_id
         LEFT JOIN sample_frames f ON f.run_id = r.id
         LEFT JOIN measurements m ON m.frame_id = f.id
-        WHERE i.file_sha256 = ?1
+        WHERE i.file_sha256 = ?1 AND i.machine_id = ?2
         GROUP BY i.id
         "#,
     )
     .bind(file_sha256)
+    .bind(machine_id)
     .fetch_optional(pool)
     .await?
     else {

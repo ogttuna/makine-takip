@@ -338,6 +338,7 @@ async fn reconfiguring_the_same_directory_preserves_the_run_and_all_checkpoints(
     manager
         .configure(CsvTailConfigRequest {
             name: Some("Renamed test source".to_string()),
+            machine_id: None,
             directory_path: source_dir.to_string_lossy().to_string(),
             file_pattern: Some("*.csv".to_string()),
             scan_interval_ms: Some(2_000),
@@ -393,6 +394,7 @@ async fn changing_directory_completes_the_old_run_and_discards_stale_checkpoints
     manager
         .configure(CsvTailConfigRequest {
             name: Some("Second source".to_string()),
+            machine_id: None,
             directory_path: second_source.to_string_lossy().to_string(),
             file_pattern: Some("*.csv".to_string()),
             scan_interval_ms: Some(1_000),
@@ -838,6 +840,7 @@ async fn configure_manager_with_interval(
     manager
         .configure(CsvTailConfigRequest {
             name: Some("Test machine CSV".to_string()),
+            machine_id: None,
             directory_path: source_dir.to_string_lossy().to_string(),
             file_pattern: Some("*.csv".to_string()),
             scan_interval_ms: Some(scan_interval_ms),
