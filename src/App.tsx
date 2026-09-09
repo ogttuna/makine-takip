@@ -39,8 +39,18 @@ import { QualitySummary } from "./features/quality/QualitySummary";
 import { ProcessHeader } from "./features/runs/ProcessHeader";
 import { RunActions } from "./features/runs/RunActions";
 import { RunList } from "./features/runs/RunList";
+import { SourceAccessControl } from "./features/source/SourceAccessControl";
 import { DEFAULT_LOCALE, getCopy, type Locale } from "./i18n";
 import { lastSourceSequence, mergeIncrementalSamples } from "./incrementalSamples";
+import {
+  DEFAULT_SOURCE_MANAGEMENT_MODE,
+  hasServerMachineData,
+  preferredMachineId,
+  preferredRunId,
+  readSourceManagementMode,
+  type SourceManagementMode,
+  writeSourceManagementMode,
+} from "./sourceManagementMode";
 import type {
   ChartLayout,
   ChartTimeRange,
@@ -67,6 +77,8 @@ export function App() {
   const [chartTimeRange, setChartTimeRange] = useState<ChartTimeRange>("24h");
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => initialThemeMode());
   const [locale, setLocale] = useState<Locale>(() => initialLocale());
+  const [sourceManagementMode, setSourceManagementMode] =
+    useState<SourceManagementMode>(() => initialSourceManagementMode());
   const [visibleChannels, setVisibleChannels] = useState<string[]>([]);
   const [qualityFilter, setQualityFilter] = useState<QualityFilter>("all");
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("quality");
@@ -193,6 +205,7 @@ export function App() {
     qualityEventsQuery.isFetching ||
     analysisQuery.isFetching ||
     runtimeScanning;
+  const isSourceManagementUnlocked = sourceManagementMode === "manager";
 
   const handleRuntimeChange = useCallback(
     (machineId: number, state: BrowserCsvTailState) => {
@@ -223,6 +236,11 @@ export function App() {
     },
     [followLive, queryClient, selectedMachineId],
   );
+  const toggleSourceManagement = useCallback(() => {
+    setSourceManagementMode((current) =>
+      current === "manager" ? "viewer" : "manager",
+    );
+  }, []);
 
   useEffect(() => {
     const machines = machinesQuery.data ?? [];
@@ -234,7 +252,7 @@ export function App() {
       selectedMachineId === null ||
       !machines.some((machine) => machine.id === selectedMachineId)
     ) {
-      setSelectedMachineId(machines[0].id);
+      setSelectedMachineId(preferredMachineId(machines));
     }
   }, [machinesQuery.data, selectedMachineId]);
 
@@ -251,7 +269,7 @@ export function App() {
       return;
     }
     if (selectedRunId === null || !runs.some((run) => run.id === selectedRunId)) {
-      setSelectedRunId(runs[0].id);
+      setSelectedRunId(preferredRunId(runs));
     }
   }, [followLive, runsQuery.data, selectedMachine?.active_run_id, selectedRunId, selectedRuntime?.activeRunId]);
 
@@ -314,6 +332,14 @@ export function App() {
       // The selected locale still applies for this page view.
     }
   }, [locale]);
+
+  useEffect(() => {
+    try {
+      writeSourceManagementMode(window.localStorage, sourceManagementMode);
+    } catch {
+      writeSourceManagementMode(null, sourceManagementMode);
+    }
+  }, [sourceManagementMode]);
 
   const sourceLabel = machinesQuery.isError
     ? copy.connection.error
@@ -492,6 +518,12 @@ export function App() {
                 ) : null}
                 {inspectorTab === "source" ? (
                   <div className="operations-panel-section source-operations">
+                    <SourceAccessControl
+                      copy={copy.fleet.sourceAccess}
+                      isUnlocked={isSourceManagementUnlocked}
+                      onToggle={toggleSourceManagement}
+                      variant="panel"
+                    />
                     <SourceStatus
                       copy={copy.fleet}
                       locale={locale}
@@ -499,17 +531,19 @@ export function App() {
                       state={selectedRuntime}
                     />
                     <RunActions copy={copy.source} locale={locale} run={selectedRun} />
-                    <ImportPanel
-                      copy={copy.import}
-                      error={importMutation.error}
-                      isPending={importMutation.isPending}
-                      lastReport={lastImportReport}
-                      onUpload={(file) => {
-                        if (selectedMachineId !== null) {
-                          importMutation.mutate({ file, machineId: selectedMachineId });
-                        }
-                      }}
-                    />
+                    {isSourceManagementUnlocked ? (
+                      <ImportPanel
+                        copy={copy.import}
+                        error={importMutation.error}
+                        isPending={importMutation.isPending}
+                        lastReport={lastImportReport}
+                        onUpload={(file) => {
+                          if (selectedMachineId !== null) {
+                            importMutation.mutate({ file, machineId: selectedMachineId });
+                          }
+                        }}
+                      />
+                    ) : null}
                   </div>
                 ) : null}
               </div>
@@ -525,6 +559,7 @@ export function App() {
           error={machinesQuery.error}
           isCreating={createMachineMutation.isPending}
           isLoading={machinesQuery.isLoading}
+          isSourceManagementUnlocked={isSourceManagementUnlocked}
           locale={locale}
           machines={machinesQuery.data ?? []}
           onCreate={async (payload: CreateMachinePayload) => {
@@ -538,6 +573,7 @@ export function App() {
             setFollowLive(true);
           }}
           onSynced={handleMachineSync}
+          onToggleSourceManagement={toggleSourceManagement}
           selectedMachineId={selectedMachineId}
         />
 
@@ -782,7 +818,7 @@ function SourceStatus({
       <strong>{machine?.name ?? "—"}</strong>
       <p>
         {state?.directoryName ??
-          (machine && machine.source_count > 0
+          (machine && hasServerMachineData(machine)
             ? copy.remoteSource
             : locale === "en"
               ? "No folder connected"
@@ -900,4 +936,16 @@ function initialLocale(): Locale {
     // Fall through to the application default.
   }
   return DEFAULT_LOCALE;
+}
+
+function initialSourceManagementMode(): SourceManagementMode {
+  if (typeof window === "undefined") {
+    return DEFAULT_SOURCE_MANAGEMENT_MODE;
+  }
+
+  try {
+    return readSourceManagementMode(window.localStorage);
+  } catch {
+    return DEFAULT_SOURCE_MANAGEMENT_MODE;
+  }
 }

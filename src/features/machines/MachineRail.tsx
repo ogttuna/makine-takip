@@ -1,13 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { CreateMachinePayload, MachineSummary } from "../../api";
 import { InlineError } from "../../components/StatusViews";
 import type { AppCopy, Locale } from "../../i18n";
+import { hasServerMachineData } from "../../sourceManagementMode";
 import {
   type BrowserCsvTailState,
   useBrowserCsvTail,
 } from "../../useBrowserCsvTail";
 import { formatDate } from "../../utils/format";
+import { SourceAccessControl } from "../source/SourceAccessControl";
 
 type MachineRailProps = {
   copy: AppCopy["fleet"];
@@ -15,6 +17,7 @@ type MachineRailProps = {
   error: Error | null;
   isCreating: boolean;
   isLoading: boolean;
+  isSourceManagementUnlocked: boolean;
   locale: Locale;
   machines: MachineSummary[];
   onCreate: (payload: CreateMachinePayload) => Promise<void>;
@@ -27,6 +30,7 @@ type MachineRailProps = {
     insertedCount: number,
     rejectedCount: number,
   ) => void;
+  onToggleSourceManagement: () => void;
   selectedMachineId: number | null;
 };
 
@@ -36,6 +40,7 @@ export function MachineRail({
   error,
   isCreating,
   isLoading,
+  isSourceManagementUnlocked,
   locale,
   machines,
   onCreate,
@@ -43,9 +48,43 @@ export function MachineRail({
   onRuntimeChange,
   onSelect,
   onSynced,
+  onToggleSourceManagement,
   selectedMachineId,
 }: MachineRailProps) {
   const [showForm, setShowForm] = useState(false);
+  const machineListRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const list = machineListRef.current;
+    if (
+      !list ||
+      selectedMachineId === null ||
+      !window.matchMedia("(max-width: 840px)").matches
+    ) {
+      return;
+    }
+
+    const selectedCard = list.querySelector<HTMLElement>(
+      `[data-machine-id="${selectedMachineId}"]`,
+    );
+    if (!selectedCard) {
+      return;
+    }
+
+    const listRect = list.getBoundingClientRect();
+    const cardRect = selectedCard.getBoundingClientRect();
+    if (cardRect.left >= listRect.left && cardRect.right <= listRect.right) {
+      return;
+    }
+
+    const prefersReducedMotion = window.matchMedia(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
+    list.scrollTo({
+      behavior: prefersReducedMotion ? "auto" : "smooth",
+      left: Math.max(0, list.scrollLeft + cardRect.left - listRect.left - 8),
+    });
+  }, [machines.length, selectedMachineId]);
 
   return (
     <aside className="machine-rail" aria-label={copy.title}>
@@ -65,19 +104,27 @@ export function MachineRail({
         </button>
       </div>
 
-      <div className={showForm ? "machine-form-reveal open" : "machine-form-reveal"}>
-        <div>
-          <MachineForm
-            copy={copy}
-            error={createError}
-            isCreating={isCreating}
-            onCreate={async (payload) => {
-              await onCreate(payload);
-              setShowForm(false);
-            }}
-          />
+      <SourceAccessControl
+        copy={copy.sourceAccess}
+        isUnlocked={isSourceManagementUnlocked}
+        onToggle={onToggleSourceManagement}
+      />
+
+      {showForm ? (
+        <div className="machine-form-reveal open">
+          <div>
+            <MachineForm
+              copy={copy}
+              error={createError}
+              isCreating={isCreating}
+              onCreate={async (payload) => {
+                await onCreate(payload);
+                setShowForm(false);
+              }}
+            />
+          </div>
         </div>
-      </div>
+      ) : null}
 
       {isLoading ? <p className="rail-state">{copy.loading}</p> : null}
       {error ? (
@@ -92,11 +139,12 @@ export function MachineRail({
         <p className="rail-state">{copy.empty}</p>
       ) : null}
 
-      <div className="machine-list">
+      <div className="machine-list" ref={machineListRef}>
         {machines.map((machine) => (
           <MachineCard
             copy={copy}
             isSelected={machine.id === selectedMachineId}
+            isSourceManagementUnlocked={isSourceManagementUnlocked}
             key={machine.id}
             locale={locale}
             machine={machine}
@@ -115,6 +163,7 @@ export function MachineRail({
 function MachineCard({
   copy,
   isSelected,
+  isSourceManagementUnlocked,
   locale,
   machine,
   onRuntimeChange,
@@ -123,6 +172,7 @@ function MachineCard({
 }: {
   copy: AppCopy["fleet"];
   isSelected: boolean;
+  isSourceManagementUnlocked: boolean;
   locale: Locale;
   machine: MachineSummary;
   onRuntimeChange: (machineId: number, state: BrowserCsvTailState) => void;
@@ -143,7 +193,10 @@ function MachineCard({
   const lastData = tail.state.lastSampledAt ?? machine.last_sampled_at;
 
   return (
-    <section className={isSelected ? "machine-card selected" : "machine-card"}>
+    <section
+      className={isSelected ? "machine-card selected" : "machine-card"}
+      data-machine-id={machine.id}
+    >
       <button
         aria-label={copy.select(machine.name)}
         className="machine-select"
@@ -176,7 +229,11 @@ function MachineCard({
             <div className="machine-source-name">
               <span>
                 {tail.state.directoryName ??
-                  (machine.source_count > 0 ? copy.remoteSource : copy.waitingFolder)}
+                  (hasServerMachineData(machine)
+                    ? copy.remoteSource
+                    : isSourceManagementUnlocked
+                      ? copy.waitingFolder
+                      : copy.waitingServerSource)}
               </span>
               <strong>
                 {tail.state.activeFileName
@@ -188,50 +245,54 @@ function MachineCard({
                     : presentation.label}
               </strong>
             </div>
-            <div className="machine-source-actions">
-              {!tail.state.configured ? (
-                <button
-                  disabled={!tail.state.supported || tail.state.status === "scanning"}
-                  onClick={() => void tail.chooseDirectory()}
-                  type="button"
-                >
-                  {copy.chooseFolder}
-                </button>
-              ) : null}
-              {tail.state.configured && !tail.state.enabled ? (
-                <button
-                  disabled={!tail.state.supported || tail.state.status === "scanning"}
-                  onClick={() => void tail.resume()}
-                  type="button"
-                >
-                  {copy.resume}
-                </button>
-              ) : null}
-              {tail.state.enabled ? (
-                <button onClick={tail.stop} type="button">
-                  {copy.stop}
-                </button>
-              ) : null}
-              {tail.state.enabled ? (
-                <button
-                  disabled={tail.state.status === "scanning"}
-                  onClick={() => void tail.rescan()}
-                  type="button"
-                >
-                  {copy.scan}
-                </button>
-              ) : null}
-              {tail.state.configured ? (
-                <button
-                  disabled={!tail.state.supported || tail.state.status === "scanning"}
-                  onClick={() => void tail.chooseDirectory()}
-                  type="button"
-                >
-                  {copy.changeFolder}
-                </button>
-              ) : null}
-            </div>
-            {tail.state.lastError ? (
+            {isSelected && isSourceManagementUnlocked ? (
+              <div className="machine-source-actions">
+                {!tail.state.configured ? (
+                  <button
+                    disabled={!tail.state.supported || tail.state.status === "scanning"}
+                    onClick={() => void tail.chooseDirectory()}
+                    type="button"
+                  >
+                    {copy.chooseFolder}
+                  </button>
+                ) : null}
+                {tail.state.configured && !tail.state.enabled ? (
+                  <button
+                    disabled={!tail.state.supported || tail.state.status === "scanning"}
+                    onClick={() => void tail.resume()}
+                    type="button"
+                  >
+                    {copy.resume}
+                  </button>
+                ) : null}
+                {tail.state.enabled ? (
+                  <button onClick={tail.stop} type="button">
+                    {copy.stop}
+                  </button>
+                ) : null}
+                {tail.state.enabled ? (
+                  <button
+                    disabled={tail.state.status === "scanning"}
+                    onClick={() => void tail.rescan()}
+                    type="button"
+                  >
+                    {copy.scan}
+                  </button>
+                ) : null}
+                {tail.state.configured ? (
+                  <button
+                    disabled={!tail.state.supported || tail.state.status === "scanning"}
+                    onClick={() => void tail.chooseDirectory()}
+                    type="button"
+                  >
+                    {copy.changeFolder}
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+            {isSelected &&
+            tail.state.lastError &&
+            (isSourceManagementUnlocked || tail.state.configured) ? (
               <p className="machine-source-error" role="alert">
                 {tail.state.lastError}
               </p>
@@ -350,7 +411,7 @@ function machineStatus(
   if (machine.active_run_id !== null) {
     return { label: copy.statuses.live, tone: "live" };
   }
-  if (state.configured || machine.source_count > 0) {
+  if (state.configured || hasServerMachineData(machine)) {
     return { label: copy.statuses.paused, tone: "paused" };
   }
   return { label: copy.statuses.unconfigured, tone: "muted" };

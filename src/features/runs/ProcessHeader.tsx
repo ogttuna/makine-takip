@@ -32,10 +32,6 @@ export function ProcessHeader({
 
   return (
     <section className="process-header" aria-label={copy.ariaLabel}>
-      <div className="process-title">
-        <span>{copy.selectedRun}</span>
-        <h2>{run?.name ?? copy.noRun}</h2>
-      </div>
       <div className="process-facts">
         <ProcessFact label={copy.duration} value={durationLabel(run, locale)} />
         <ProcessFact
