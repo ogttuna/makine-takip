@@ -118,6 +118,17 @@ export const COPY = {
       last24Hours: "24 Saat",
       last7Days: "7 Gün",
       allTime: "Tümü",
+      customRange: "Tarih",
+      startDate: "Başlangıç",
+      endDate: "Bitiş",
+      applyDateRange: "Tarihleri göster",
+      editDateRange: "Tarih aralığını değiştir",
+      changeDateRange: "Değiştir",
+      dateRangeErrors: {
+        missing: "Başlangıç ve bitiş tarihlerini seçin.",
+        invalid: "Geçerli bir tarih aralığı seçin.",
+        order: "Başlangıç tarihi bitiş tarihinden sonra olamaz.",
+      },
       modeLabel: "Düzen",
       modeAria: "Grafik düzeni",
       dashboard: "Kontrol paneli",
@@ -126,6 +137,10 @@ export const COPY = {
         visible < total
           ? `Son ${visible} / ${total} kayıt gösteriliyor`
           : `${visible} kayıt birlikte gösteriliyor`,
+      filteredSamples: (visible: number) =>
+        `Seçilen tarihlerde ${visible} kayıt gösteriliyor`,
+      sampleLimit: (limit: number) =>
+        `Seçilen aralık çok yoğun. En güncel ${limit.toLocaleString("tr-TR")} kayıt gösteriliyor; tamamını görmek için tarih aralığını daraltın.`,
       activeFile: (fileName: string) => `Canlı dosya: ${fileName}`,
       loadingTitle: "Grafik yükleniyor",
       loadingMessage: "Grafik alanı hazırlanıyor.",
@@ -195,6 +210,8 @@ export const COPY = {
         samplesErrorTitle: "Örnekler yüklenemedi",
         emptyTitle: "Örnek yok",
         emptyMessage: "Bir CSV dosyası içe aktar veya kayıtlı bir çalışma seç.",
+        rangeEmptyTitle: "Bu tarihlerde veri yok",
+        rangeEmptyMessage: "Başka bir tarih aralığı seçerek tekrar deneyin.",
         noChannelTitle: "Kanal seçilmedi",
         noChannelMessage: "Grafik çizmek için en az bir kanal seç.",
       },
@@ -490,6 +507,17 @@ export const COPY = {
       last24Hours: "24 Hours",
       last7Days: "7 Days",
       allTime: "All",
+      customRange: "Dates",
+      startDate: "Start",
+      endDate: "End",
+      applyDateRange: "Show dates",
+      editDateRange: "Change date range",
+      changeDateRange: "Change",
+      dateRangeErrors: {
+        missing: "Select both a start and end date.",
+        invalid: "Select a valid date range.",
+        order: "The start date cannot be after the end date.",
+      },
       modeLabel: "Layout",
       modeAria: "Chart layout",
       dashboard: "Control board",
@@ -498,6 +526,10 @@ export const COPY = {
         visible < total
           ? `Showing latest ${visible} / ${total} samples`
           : `Showing ${visible} samples together`,
+      filteredSamples: (visible: number) =>
+        `Showing ${visible} samples in the selected dates`,
+      sampleLimit: (limit: number) =>
+        `This range is dense. Showing the latest ${limit.toLocaleString("en-US")} samples; narrow the dates to see the complete range.`,
       activeFile: (fileName: string) => `Live file: ${fileName}`,
       loadingTitle: "Loading chart",
       loadingMessage: "Preparing chart area.",
@@ -567,6 +599,8 @@ export const COPY = {
         samplesErrorTitle: "Samples could not be loaded",
         emptyTitle: "No samples",
         emptyMessage: "Import a CSV file or select a recorded run.",
+        rangeEmptyTitle: "No data in these dates",
+        rangeEmptyMessage: "Choose another date range and try again.",
         noChannelTitle: "No channel selected",
         noChannelMessage: "Select at least one channel to draw the chart.",
       },

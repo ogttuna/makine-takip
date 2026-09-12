@@ -1,4 +1,4 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useId, useState } from "react";
 
 import type { ProcessStateSegment, QualityEvent, SampleFrame } from "../../api";
 import {
@@ -8,9 +8,19 @@ import {
   sortChannels,
   type ChannelGroup,
 } from "../../channelConfig";
+import {
+  timestampDateInputValue,
+  validateChartDateRange,
+  type ChartDateRangeError,
+} from "../../chartTimeRange";
 import { ChartState } from "../../components/StatusViews";
 import type { AppCopy, Locale } from "../../i18n";
-import type { ChartLayout, ChartTimeRange, ThemeMode } from "../../types";
+import type {
+  ChartDateRange,
+  ChartLayout,
+  ChartTimeRange,
+  ThemeMode,
+} from "../../types";
 
 const TelemetryChart = lazy(() =>
   import("../../TelemetryChart").then((module) => ({ default: module.TelemetryChart })),
@@ -44,29 +54,77 @@ export function UnitNote({
 }
 
 export function ChartViewControls({
+  availableFrom,
+  availableTo,
   chartLayout,
   chartTimeRange,
   copy,
+  customDateRange,
+  locale,
   onChartLayoutChange,
+  onCustomDateRangeApply,
   onChartTimeRangeChange,
 }: {
+  availableFrom: string | null;
+  availableTo: string | null;
   chartLayout: ChartLayout;
   chartTimeRange: ChartTimeRange;
   copy: AppCopy["chart"];
+  customDateRange: ChartDateRange | null;
+  locale: Locale;
   onChartLayoutChange: (layout: ChartLayout) => void;
+  onCustomDateRangeApply: (range: ChartDateRange) => void;
   onChartTimeRangeChange: (range: ChartTimeRange) => void;
 }) {
+  const errorId = useId();
+  const [dateEditorOpen, setDateEditorOpen] = useState(false);
+  const [dateRangeDraft, setDateRangeDraft] = useState<ChartDateRange>({
+    startDate: "",
+    endDate: "",
+  });
+  const [dateRangeError, setDateRangeError] = useState<ChartDateRangeError | null>(null);
+  const minDate = timestampDateInputValue(availableFrom) ?? undefined;
+  const maxDate = timestampDateInputValue(availableTo) ?? undefined;
+
+  const choosePreset = (range: Exclude<ChartTimeRange, "custom">) => {
+    setDateEditorOpen(false);
+    setDateRangeError(null);
+    onChartTimeRangeChange(range);
+  };
+  const openDateEditor = () => {
+    const suggestedDate = maxDate ?? minDate ?? "";
+    setDateRangeDraft(
+      customDateRange ?? {
+        startDate: suggestedDate,
+        endDate: suggestedDate,
+      },
+    );
+    setDateRangeError(null);
+    setDateEditorOpen(true);
+  };
+  const applyDateRange = () => {
+    const error = validateChartDateRange(dateRangeDraft);
+    if (error) {
+      setDateRangeError(error);
+      return;
+    }
+
+    setDateRangeError(null);
+    setDateEditorOpen(false);
+    onCustomDateRangeApply(dateRangeDraft);
+  };
+
   return (
     <div className="chart-toolbar">
       <div className="toolbar-cluster">
         <span>{copy.rangeLabel}</span>
         <div className="segmented-control" role="group" aria-label={copy.rangeAria}>
-          {(["24h", "7d", "all"] as ChartTimeRange[]).map((range) => (
+          {(["24h", "7d", "all"] as const).map((range) => (
             <button
               aria-pressed={chartTimeRange === range}
               className={chartTimeRange === range ? "active" : ""}
               key={range}
-              onClick={() => onChartTimeRangeChange(range)}
+              onClick={() => choosePreset(range)}
               type="button"
             >
               {range === "24h"
@@ -76,6 +134,15 @@ export function ChartViewControls({
                   : copy.allTime}
             </button>
           ))}
+          <button
+            aria-expanded={dateEditorOpen}
+            aria-pressed={chartTimeRange === "custom"}
+            className={chartTimeRange === "custom" ? "active" : ""}
+            onClick={openDateEditor}
+            type="button"
+          >
+            {copy.customRange}
+          </button>
         </div>
       </div>
       <div className="toolbar-cluster">
@@ -99,8 +166,86 @@ export function ChartViewControls({
           </button>
         </div>
       </div>
+
+      {dateEditorOpen ? (
+        <form
+          className="date-range-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            applyDateRange();
+          }}
+        >
+          <div className="date-range-fields">
+            <label>
+              <span>{copy.startDate}</span>
+              <input
+                aria-describedby={dateRangeError ? errorId : undefined}
+                max={maxDate}
+                min={minDate}
+                onChange={(event) => {
+                  setDateRangeDraft((current) => ({
+                    ...current,
+                    startDate: event.target.value,
+                  }));
+                  setDateRangeError(null);
+                }}
+                type="date"
+                value={dateRangeDraft.startDate}
+              />
+            </label>
+            <span className="date-range-separator" aria-hidden="true">
+              →
+            </span>
+            <label>
+              <span>{copy.endDate}</span>
+              <input
+                aria-describedby={dateRangeError ? errorId : undefined}
+                max={maxDate}
+                min={minDate}
+                onChange={(event) => {
+                  setDateRangeDraft((current) => ({
+                    ...current,
+                    endDate: event.target.value,
+                  }));
+                  setDateRangeError(null);
+                }}
+                type="date"
+                value={dateRangeDraft.endDate}
+              />
+            </label>
+          </div>
+          <button className="date-range-apply" type="submit">
+            {copy.applyDateRange}
+          </button>
+          {dateRangeError ? (
+            <p className="date-range-error" id={errorId} role="alert">
+              {copy.dateRangeErrors[dateRangeError]}
+            </p>
+          ) : null}
+        </form>
+      ) : chartTimeRange === "custom" && customDateRange ? (
+        <button
+          aria-label={copy.editDateRange}
+          className="date-range-summary"
+          onClick={openDateEditor}
+          type="button"
+        >
+          <span>{formatDateInput(customDateRange.startDate, locale)}</span>
+          <b aria-hidden="true">→</b>
+          <span>{formatDateInput(customDateRange.endDate, locale)}</span>
+          <strong>{copy.changeDateRange}</strong>
+        </button>
+      ) : null}
     </div>
   );
+}
+
+function formatDateInput(value: string, locale: Locale): string {
+  const [year, month, day] = value.split("-").map(Number);
+  return new Intl.DateTimeFormat(locale === "en" ? "en-US" : "tr-TR", {
+    dateStyle: "medium",
+    timeZone: "UTC",
+  }).format(new Date(Date.UTC(year, month - 1, day)));
 }
 
 export function ChartArea({

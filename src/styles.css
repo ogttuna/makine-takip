@@ -1422,6 +1422,124 @@ code {
   color: var(--paper-raised);
 }
 
+.date-range-form {
+  display: grid;
+  flex: 1 0 100%;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.date-range-fields {
+  display: flex;
+  min-width: 0;
+  align-items: end;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.date-range-fields label {
+  display: grid;
+  min-width: 148px;
+  gap: 5px;
+}
+
+.date-range-fields label > span {
+  color: var(--ink-faint);
+  font-size: 0.64rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.date-range-fields input {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--paper-raised);
+  color: var(--ink);
+  padding: 6px 9px;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.date-range-fields input:hover {
+  border-color: var(--accent);
+}
+
+.date-range-separator {
+  display: grid;
+  min-height: 38px;
+  place-items: center;
+  color: var(--ink-faint);
+  font-size: 0.78rem;
+}
+
+.date-range-apply {
+  min-height: 38px;
+  border: 1px solid var(--ink);
+  border-radius: var(--radius-sm);
+  background: var(--ink);
+  color: var(--paper-raised);
+  padding: 7px 13px;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.date-range-apply:hover {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+
+.date-range-error {
+  grid-column: 1 / -1;
+  justify-self: end;
+  color: var(--alarm);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.date-range-summary {
+  display: inline-flex;
+  min-height: 34px;
+  flex: 1 0 100%;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  padding: 0;
+  font-size: 0.72rem;
+}
+
+.date-range-summary b {
+  color: var(--accent);
+}
+
+.date-range-summary strong {
+  border-bottom: 1px solid var(--line-strong);
+  color: var(--accent-strong);
+  font-size: 0.68rem;
+}
+
+.date-range-summary:hover strong {
+  border-color: var(--accent-strong);
+}
+
+.range-limit-note {
+  border: 1px solid var(--warning);
+  border-radius: var(--radius);
+  background: var(--warning-soft);
+  color: var(--ink-soft);
+  padding: 9px 11px;
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
 .unit-note {
   display: flex;
   gap: 8px;
@@ -2257,6 +2375,14 @@ code {
     justify-content: flex-start;
   }
 
+  .date-range-fields {
+    justify-content: flex-start;
+  }
+
+  .date-range-summary {
+    justify-content: flex-start;
+  }
+
   .chart-grid.dashboard .chart-tile,
   .chart-grid.dashboard .chart-tile.primary {
     grid-column: 1 / -1;
@@ -2382,6 +2508,32 @@ code {
     padding-inline: 8px;
   }
 
+  .date-range-form {
+    grid-template-columns: 1fr;
+  }
+
+  .date-range-fields {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .date-range-fields label {
+    min-width: 0;
+  }
+
+  .date-range-separator {
+    display: none;
+  }
+
+  .date-range-apply,
+  .date-range-summary {
+    width: 100%;
+  }
+
+  .date-range-summary {
+    justify-content: space-between;
+  }
+
   .quality-filters {
     grid-template-columns: repeat(2, 1fr);
   }
@@ -2402,6 +2554,7 @@ code {
 
 @media (pointer: coarse) {
   button,
+  input,
   select,
   .file-drop {
     min-height: 44px !important;

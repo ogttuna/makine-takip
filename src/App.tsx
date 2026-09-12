@@ -16,8 +16,10 @@ import {
   type SampleFrame,
 } from "./api";
 import {
+  chartDateRangeQuery,
   samplesForChartRange,
   segmentsForVisibleSamples,
+  timestampDateInputValue,
 } from "./chartTimeRange";
 import { getChannelConfig } from "./channelConfig";
 import { ChartState } from "./components/StatusViews";
@@ -52,6 +54,7 @@ import {
   writeSourceManagementMode,
 } from "./sourceManagementMode";
 import type {
+  ChartDateRange,
   ChartLayout,
   ChartTimeRange,
   InspectorTab,
@@ -65,6 +68,7 @@ const THEME_STORAGE_KEY = "freezedry.theme";
 const LOCALE_STORAGE_KEY = "freezedry.locale";
 const LIVE_REFETCH_INTERVAL_MS = 30_000;
 const MAX_VISIBLE_SAMPLES = 5_000;
+const MAX_CHART_RANGE_SAMPLES = 10_000;
 
 export function App() {
   const queryClient = useQueryClient();
@@ -75,6 +79,7 @@ export function App() {
   >({});
   const [chartLayout, setChartLayout] = useState<ChartLayout>("dashboard");
   const [chartTimeRange, setChartTimeRange] = useState<ChartTimeRange>("24h");
+  const [customDateRange, setCustomDateRange] = useState<ChartDateRange | null>(null);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => initialThemeMode());
   const [locale, setLocale] = useState<Locale>(() => initialLocale());
   const [sourceManagementMode, setSourceManagementMode] =
@@ -111,6 +116,19 @@ export function App() {
     [runsQuery.data, selectedRunId],
   );
   const selectedRunIsLive = selectedRun?.status === "running";
+  const customSampleBounds = customDateRange
+    ? chartDateRangeQuery(customDateRange)
+    : null;
+  const usesServerChartRange =
+    chartTimeRange === "custom" && customSampleBounds !== null;
+  const latestRunDate = timestampDateInputValue(
+    selectedRun?.finished_at ?? selectedMachine?.last_sampled_at,
+  );
+  const customRangeIncludesLatest =
+    customDateRange !== null &&
+    latestRunDate !== null &&
+    customDateRange.startDate <= latestRunDate &&
+    customDateRange.endDate >= latestRunDate;
   const samplesQuery = useQuery({
     queryKey: ["run-samples", selectedRunId],
     queryFn: async () => {
@@ -130,6 +148,27 @@ export function App() {
     },
     enabled: selectedRunId !== null,
     refetchInterval: selectedRunIsLive ? LIVE_REFETCH_INTERVAL_MS : false,
+  });
+  const chartRangeSamplesQuery = useQuery({
+    queryKey: [
+      "run-chart-samples",
+      selectedRunId,
+      chartTimeRange,
+      customSampleBounds?.from ?? null,
+      customSampleBounds?.to ?? null,
+    ],
+    queryFn: () =>
+      fetchRunSamples(selectedRunId!, {
+        ...(chartTimeRange === "custom" && customSampleBounds
+          ? customSampleBounds
+          : {}),
+        latest: MAX_CHART_RANGE_SAMPLES,
+      }),
+    enabled: selectedRunId !== null && usesServerChartRange,
+    refetchInterval:
+      selectedRunIsLive && usesServerChartRange && customRangeIncludesLatest
+        ? LIVE_REFETCH_INTERVAL_MS
+        : false,
   });
   const qualityEventsQuery = useQuery({
     queryKey: ["run-quality-events", selectedRunId],
@@ -176,15 +215,34 @@ export function App() {
   const qualityEvents = qualityEventsQuery.data ?? [];
   const analysis = analysisQuery.data ?? null;
   const chartSamples = useMemo(
-    () => samplesForChartRange(samples, chartTimeRange),
-    [chartTimeRange, samples],
+    () =>
+      usesServerChartRange
+        ? (chartRangeSamplesQuery.data ?? [])
+        : samplesForChartRange(samples, chartTimeRange),
+    [chartRangeSamplesQuery.data, chartTimeRange, samples, usesServerChartRange],
   );
   const chartProcessSegments = useMemo(
-    () => segmentsForVisibleSamples(analysis?.segments ?? [], chartSamples, chartTimeRange),
-    [analysis?.segments, chartSamples, chartTimeRange],
+    () => segmentsForVisibleSamples(analysis?.segments ?? [], chartSamples),
+    [analysis?.segments, chartSamples],
   );
+  const chartIsLoading = usesServerChartRange
+    ? chartRangeSamplesQuery.isLoading
+    : samplesQuery.isLoading;
+  const chartIsError = usesServerChartRange
+    ? chartRangeSamplesQuery.isError
+    : samplesQuery.isError;
+  const chartError = usesServerChartRange
+    ? chartRangeSamplesQuery.error
+    : samplesQuery.error;
+  const chartRangeLimited =
+    usesServerChartRange &&
+    chartSamples.length === MAX_CHART_RANGE_SAMPLES;
   const copy = getCopy(locale);
-  const rawChannelCodes = useMemo(() => getRawChannelCodes(samples), [samples]);
+  const channelSourceSamples = chartSamples.length > 0 ? chartSamples : samples;
+  const rawChannelCodes = useMemo(
+    () => getRawChannelCodes(channelSourceSamples),
+    [channelSourceSamples],
+  );
   const channelCodes = useMemo(
     () => withDerivedChannels(rawChannelCodes),
     [rawChannelCodes],
@@ -202,6 +260,7 @@ export function App() {
     machinesQuery.isFetching ||
     runsQuery.isFetching ||
     samplesQuery.isFetching ||
+    chartRangeSamplesQuery.isFetching ||
     qualityEventsQuery.isFetching ||
     analysisQuery.isFetching ||
     runtimeScanning;
@@ -228,6 +287,7 @@ export function App() {
       }
       if (runId !== null && insertedCount > 0) {
         void queryClient.invalidateQueries({ queryKey: ["run-samples", runId] });
+        void queryClient.invalidateQueries({ queryKey: ["run-chart-samples", runId] });
       }
       if (runId !== null && insertedCount + rejectedCount > 0) {
         void queryClient.invalidateQueries({ queryKey: ["run-quality-events", runId] });
@@ -354,6 +414,9 @@ export function App() {
     if (selectedRunId !== null) {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["run-samples", selectedRunId] }),
+        queryClient.invalidateQueries({
+          queryKey: ["run-chart-samples", selectedRunId],
+        }),
         queryClient.invalidateQueries({
           queryKey: ["run-quality-events", selectedRunId],
         }),
@@ -613,13 +676,15 @@ export function App() {
                     </p>
                     <h2>{copy.chart.title}</h2>
                     <p>{copy.chart.subtitle}</p>
-                    {samples.length > 0 ? (
+                    {!chartIsLoading && chartSamples.length > 0 ? (
                       <div className="chart-context" aria-live="polite">
                         <span>
-                          {copy.chart.visibleSamples(
-                            chartSamples.length,
-                            selectedRun?.row_count ?? samples.length,
-                          )}
+                          {chartTimeRange === "custom"
+                            ? copy.chart.filteredSamples(chartSamples.length)
+                            : copy.chart.visibleSamples(
+                                chartSamples.length,
+                                selectedRun?.row_count ?? chartSamples.length,
+                              )}
                         </span>
                         {selectedRuntime?.activeFileName &&
                         selectedRunId === selectedRuntime.activeRunId ? (
@@ -631,10 +696,20 @@ export function App() {
                     ) : null}
                   </div>
                   <ChartViewControls
+                    availableFrom={selectedRun?.started_at ?? null}
+                    availableTo={
+                      selectedRun?.finished_at ?? selectedMachine.last_sampled_at
+                    }
                     chartLayout={chartLayout}
                     chartTimeRange={chartTimeRange}
                     copy={copy.chart}
+                    customDateRange={customDateRange}
+                    locale={locale}
                     onChartLayoutChange={setChartLayout}
+                    onCustomDateRangeApply={(range) => {
+                      setCustomDateRange(range);
+                      setChartTimeRange("custom");
+                    }}
                     onChartTimeRangeChange={setChartTimeRange}
                   />
                 </div>
@@ -644,6 +719,11 @@ export function App() {
                   locale={locale}
                   pendingChannels={pendingUnitChannels}
                 />
+                {chartRangeLimited ? (
+                  <p className="range-limit-note" role="status">
+                    {copy.chart.sampleLimit(MAX_CHART_RANGE_SAMPLES)}
+                  </p>
+                ) : null}
                 <ChannelControls
                   channels={channelCodes}
                   copy={copy.chart}
@@ -652,23 +732,37 @@ export function App() {
                   visibleChannels={activeVisibleChannels}
                 />
 
-                {samplesQuery.isLoading ? (
+                {chartIsLoading ? (
                   <ChartState
                     message={copy.chart.states.runLoadingMessage}
                     title={copy.chart.states.runLoadingTitle}
                   />
-                ) : samplesQuery.isError ? (
+                ) : chartIsError ? (
                   <ChartState
                     actionLabel={copy.common.retry}
-                    message={samplesQuery.error.message}
-                    onAction={() => samplesQuery.refetch()}
+                    message={chartError?.message ?? copy.chart.states.samplesErrorTitle}
+                    onAction={() => {
+                      if (usesServerChartRange) {
+                        void chartRangeSamplesQuery.refetch();
+                      } else {
+                        void samplesQuery.refetch();
+                      }
+                    }}
                     tone="error"
                     title={copy.chart.states.samplesErrorTitle}
                   />
-                ) : samples.length === 0 ? (
+                ) : chartSamples.length === 0 ? (
                   <ChartState
-                    message={copy.chart.states.emptyMessage}
-                    title={copy.chart.states.emptyTitle}
+                    message={
+                      chartTimeRange === "custom"
+                        ? copy.chart.states.rangeEmptyMessage
+                        : copy.chart.states.emptyMessage
+                    }
+                    title={
+                      chartTimeRange === "custom"
+                        ? copy.chart.states.rangeEmptyTitle
+                        : copy.chart.states.emptyTitle
+                    }
                   />
                 ) : activeVisibleChannels.length === 0 ? (
                   <ChartState

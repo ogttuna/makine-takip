@@ -1,4 +1,4 @@
-import type { ChartTimeRange } from "./types";
+import type { ChartDateRange, ChartTimeRange } from "./types";
 
 const HOUR_MS = 60 * 60 * 1_000;
 
@@ -11,11 +11,18 @@ type TimeSegment = {
   finished_at: string | null;
 };
 
+export type ChartDateRangeError = "missing" | "invalid" | "order";
+
+export type ChartDateRangeQuery = {
+  from: string;
+  to: string;
+};
+
 export function samplesForChartRange<T extends TimestampedSample>(
   samples: T[],
   range: ChartTimeRange,
 ): T[] {
-  if (range === "all" || samples.length === 0) {
+  if (range === "all" || range === "custom" || samples.length === 0) {
     return samples;
   }
 
@@ -36,9 +43,8 @@ export function samplesForChartRange<T extends TimestampedSample>(
 export function segmentsForVisibleSamples<T extends TimeSegment>(
   segments: T[],
   visibleSamples: TimestampedSample[],
-  range: ChartTimeRange,
 ): T[] {
-  if (range === "all" || segments.length === 0) {
+  if (segments.length === 0) {
     return segments;
   }
 
@@ -77,6 +83,60 @@ export function segmentsForVisibleSamples<T extends TimeSegment>(
       },
     ];
   });
+}
+
+export function validateChartDateRange(
+  range: ChartDateRange,
+): ChartDateRangeError | null {
+  if (!range.startDate || !range.endDate) {
+    return "missing";
+  }
+
+  if (!isValidDateInput(range.startDate) || !isValidDateInput(range.endDate)) {
+    return "invalid";
+  }
+
+  if (range.startDate > range.endDate) {
+    return "order";
+  }
+
+  return null;
+}
+
+export function chartDateRangeQuery(
+  range: ChartDateRange,
+): ChartDateRangeQuery | null {
+  if (validateChartDateRange(range) !== null) {
+    return null;
+  }
+
+  return {
+    from: `${range.startDate}T00:00:00.000`,
+    to: `${range.endDate}T23:59:59.999`,
+  };
+}
+
+export function timestampDateInputValue(value: string | null | undefined): string | null {
+  const datePart = value?.match(/^(\d{4}-\d{2}-\d{2})/)?.[1] ?? null;
+  return datePart && isValidDateInput(datePart) ? datePart : null;
+}
+
+function isValidDateInput(value: string): boolean {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return false;
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+
+  return (
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+  );
 }
 
 function latestValidTimestamp(samples: TimestampedSample[]): number | null {
