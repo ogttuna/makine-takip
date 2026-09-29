@@ -46,6 +46,14 @@ The dedicated integration tests cover mixed clocks, boundaries, duplicates,
 contradictory qualities/values, late imports, pinned paging, long windows, invalid
 requests, authentication, and unverified channel metadata.
 
-The 2026-09-29 implementation is deployed only to an isolated test copy. Do not
-replace the production image, share its writable SQLite volume, enable live CSV
-watchers in test, or change production routing without the owner's explicit approval.
+After isolated testing, the owner explicitly authorized the production release on
+2026-09-29. Production uses `makinetakip-app:monitoring-20260929-a9be018`, with the
+existing SQLite volume, browser source checkpoints, frontend and public routing
+preserved. Factory connects over the private `uretim_machine_monitoring` network
+using a separate production credential. No SQLite migration was introduced.
+
+Release backup verification found all 66,301 existing frames and 930,672 readings
+unchanged; both machines continued ingesting after replacement. Rollback restores
+the previous application image without rewinding the database. Subsequent live
+changes require authorization; test copies must not enable live source collection
+or share production's writable SQLite volume.
