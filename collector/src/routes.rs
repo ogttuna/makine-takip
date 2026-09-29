@@ -199,6 +199,7 @@ pub fn router(pool: SqlitePool) -> Router {
 }
 
 pub fn router_with_csv_tail(pool: SqlitePool, csv_tail: CsvTailManager) -> Router {
+    let integration = crate::integration::router(pool.clone());
     let state = AppState { pool, csv_tail };
     let static_files = ServeDir::new("dist").fallback(ServeFile::new("dist/index.html"));
 
@@ -245,6 +246,7 @@ pub fn router_with_csv_tail(pool: SqlitePool, csv_tail: CsvTailManager) -> Route
         .route("/api/runs/{id}/export.csv", get(export_run_csv))
         .fallback_service(static_files)
         .with_state(state)
+        .nest("/api/integration/v1", integration)
 }
 
 async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse>, ApiError> {

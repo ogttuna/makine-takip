@@ -7,6 +7,7 @@ pub mod db;
 pub mod export;
 pub mod fleet;
 pub mod ingest;
+pub mod integration;
 pub mod machine;
 pub mod routes;
 pub mod server;
