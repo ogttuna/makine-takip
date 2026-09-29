@@ -35,6 +35,7 @@ import {
   withDerivedChannels,
 } from "./features/charts/channelSelection";
 import { LiveSnapshot } from "./features/dashboard/LiveSnapshot";
+import { MachineExportPanel } from "./features/export/MachineExportPanel";
 import { ImportPanel } from "./features/import/ImportPanel";
 import { MachineRail } from "./features/machines/MachineRail";
 import { QualitySummary } from "./features/quality/QualitySummary";
@@ -114,6 +115,18 @@ export function App() {
   const selectedRun = useMemo(
     () => runsQuery.data?.find((run) => run.id === selectedRunId) ?? null,
     [runsQuery.data, selectedRunId],
+  );
+  const machineAvailableFrom = useMemo(
+    () =>
+      (runsQuery.data ?? []).reduce<string | null>((earliest, run) => {
+        if (!run.started_at) {
+          return earliest;
+        }
+        return earliest === null || run.started_at < earliest
+          ? run.started_at
+          : earliest;
+      }, null),
+    [runsQuery.data],
   );
   const selectedRunIsLive = selectedRun?.status === "running";
   const customSampleBounds = customDateRange
@@ -654,6 +667,14 @@ export function App() {
                 runs={runsQuery.data ?? []}
                 selectedRunId={selectedRunId}
                 state={selectedRuntime}
+              />
+
+              <MachineExportPanel
+                availableFrom={machineAvailableFrom}
+                availableTo={selectedMachine.last_sampled_at}
+                copy={copy.dataExport}
+                key={selectedMachine.id}
+                machine={selectedMachine}
               />
 
               <ProcessHeader

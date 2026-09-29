@@ -348,6 +348,29 @@ export type FetchRunSamplesOptions = {
   afterSequence?: number;
 };
 
+export type MachineExportFormat = "csv" | "xlsx";
+
+export type MachineExportRange = {
+  from: string;
+  to: string;
+};
+
+export type MachineExportDownload = {
+  blob: Blob;
+  fileName: string;
+  rowCount: number;
+};
+
+export class MachineExportRequestError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+  ) {
+    super(message);
+    this.name = "MachineExportRequestError";
+  }
+}
+
 const configuredApiBaseUrl = import.meta.env.VITE_COLLECTOR_URL?.trim();
 const apiBaseUrl =
   configuredApiBaseUrl ||
@@ -675,6 +698,40 @@ export async function fetchRunAnalysis(runId: number): Promise<RunAnalysis> {
 export async function reanalyzeRun(runId: number): Promise<RunAnalysis> {
   const payload = await postEmpty(`${apiBaseUrl}/api/runs/${runId}/analysis`);
   return runAnalysisSchema.parse(payload);
+}
+
+export async function downloadMachineExport(
+  machineId: number,
+  range: MachineExportRange,
+  format: MachineExportFormat,
+): Promise<MachineExportDownload> {
+  const url = new URL(`${apiBaseUrl}/api/machines/${machineId}/export.${format}`);
+  url.searchParams.set("from", range.from);
+  url.searchParams.set("to", range.to);
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new MachineExportRequestError(
+      await responseMessage(response),
+      response.status,
+    );
+  }
+
+  const disposition = response.headers.get("content-disposition");
+  const fileName =
+    disposition?.match(/filename="([^"]+)"/i)?.[1] ??
+    `machine-${machineId}-export.${format}`;
+  const rowCountText = response.headers.get("x-export-row-count");
+  const parsedRowCount = rowCountText === null ? Number.NaN : Number(rowCountText);
+
+  return {
+    blob: await response.blob(),
+    fileName,
+    rowCount:
+      Number.isInteger(parsedRowCount) && parsedRowCount >= 0
+        ? parsedRowCount
+        : 0,
+  };
 }
 
 export function getCollectorUrl(): string {

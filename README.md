@@ -16,6 +16,7 @@ Bu repo calisan, cok makineli bir operator ve proses izleme uygulamasi icerir:
 - Tauri acilisinda otomatik baslayan gomulu collector
 - Rust/Tokio/Axum collector API
 - CSV import, otomatik CSV klasor izleme ve kaynak bagimsiz canli ingest API'si
+- Makine ve saat araligi bazli, tek dosyada birlestirilmis CSV/XLSX exportu
 - Excel analizinden cikarilan, versiyonlu FD-750 dongu ve proses-state motoru
 - Dongu/state ozeti, tani olaylari ve grafik uzerinde proses-state bantlari
 - SQLx + SQLite migration, WAL ve STRICT tablolar
@@ -278,7 +279,22 @@ GET  /api/runs/:id/samples?latest=5000
 GET  /api/runs/:id/samples?after_sequence=162&limit=1000
 GET  /api/runs/:id/analysis
 POST /api/runs/:id/analysis
+GET  /api/machines/:id/export.csv?from=...&to=...
+GET  /api/machines/:id/export.xlsx?from=...&to=...
 ```
+
+### Makine verisini disa aktarma
+
+Operator once makineyi, sonra baslangic ve bitis tarih-saatini secer. Tek
+istek en fazla 120 saat (5 gun) olabilir. Collector secilen makinenin bu
+araliktaki farkli kosu ve gunluk dosyalarini kronolojik olarak birlestirir;
+ayni timestamp eski ve yeni kosularda tekrar ediyorsa en guncel kaynak kaydini
+bir kez yazar. Cikti satirlarinda makine kodu ve adi bulunur.
+
+CSV ciktisi Excel ile uyumlu noktalı virgul ayiraci ve UTF-8 BOM kullanir.
+XLSX ciktisi filtrelenebilir `Veriler` sayfasi ile makine, aralik ve kayit
+sayisini gosteren `Bilgi` sayfasini icerir. `from` ve `to` degerleri makine
+yerel saatinde `yyyy-MM-ddTHH:mm:ss.SSS` bicimindedir.
 
 ### Manuel CSV import
 

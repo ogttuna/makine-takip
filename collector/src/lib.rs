@@ -4,6 +4,7 @@ pub mod config;
 pub mod csv_import;
 pub mod csv_tail;
 pub mod db;
+pub mod export;
 pub mod fleet;
 pub mod ingest;
 pub mod machine;

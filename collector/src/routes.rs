@@ -13,6 +13,7 @@ use crate::browser_tail::{
 };
 use crate::csv_import::{ImportReport, import_csv_bytes_for_machine};
 use crate::csv_tail::{CsvTailConfigRequest, CsvTailManager, CsvTailStatus};
+use crate::export::{ExportFormat, ExportRange, generate_export, load_machine_export_data};
 use crate::fleet::{CreateMachineRequest, MachineSummary, UpdateMachineRequest};
 use crate::ingest::{AppendSamplesReport, AppendSamplesRequest, CreateRunRequest};
 
@@ -81,6 +82,12 @@ struct SamplesQuery {
     limit: Option<i64>,
     latest: Option<i64>,
     after_sequence: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MachineExportQuery {
+    from: String,
+    to: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -200,6 +207,8 @@ pub fn router_with_csv_tail(pool: SqlitePool, csv_tail: CsvTailManager) -> Route
         .route("/api/live", get(live))
         .route("/api/machines", get(machines).post(create_machine))
         .route("/api/machines/{id}", patch(update_machine))
+        .route("/api/machines/{id}/export.csv", get(export_machine_csv))
+        .route("/api/machines/{id}/export.xlsx", get(export_machine_xlsx))
         .route(
             "/api/csv-tail",
             get(csv_tail_status).put(configure_csv_tail),
@@ -282,6 +291,59 @@ async fn update_machine(
             .await
             .map_err(ApiError::bad_request)?,
     ))
+}
+
+async fn export_machine_csv(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Query(query): Query<MachineExportQuery>,
+) -> Result<Response, ApiError> {
+    export_machine_response(&state.pool, id, query, ExportFormat::Csv).await
+}
+
+async fn export_machine_xlsx(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Query(query): Query<MachineExportQuery>,
+) -> Result<Response, ApiError> {
+    export_machine_response(&state.pool, id, query, ExportFormat::Xlsx).await
+}
+
+async fn export_machine_response(
+    pool: &SqlitePool,
+    machine_id: i64,
+    query: MachineExportQuery,
+    format: ExportFormat,
+) -> Result<Response, ApiError> {
+    let range = ExportRange::parse(&query.from, &query.to).map_err(ApiError::bad_request)?;
+    let Some(data) = load_machine_export_data(pool, machine_id, range).await? else {
+        return Err(ApiError::not_found(anyhow::anyhow!(
+            "machine {machine_id} was not found"
+        )));
+    };
+
+    if data.is_empty() {
+        return Err(ApiError::not_found(anyhow::anyhow!(
+            "machine {machine_id} does not contain samples in the selected range"
+        )));
+    }
+
+    let generated = generate_export(&data, format)?;
+    let content_disposition = format!("attachment; filename=\"{}\"", generated.file_name);
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, generated.content_type.to_string()),
+            (header::CONTENT_DISPOSITION, content_disposition),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+            (
+                header::HeaderName::from_static("x-export-row-count"),
+                generated.row_count.to_string(),
+            ),
+        ],
+        generated.bytes,
+    )
+        .into_response())
 }
 
 async fn csv_tail_status(State(state): State<AppState>) -> Result<Json<CsvTailStatus>, ApiError> {

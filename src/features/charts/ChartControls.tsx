@@ -77,6 +77,8 @@ export function ChartViewControls({
   onChartTimeRangeChange: (range: ChartTimeRange) => void;
 }) {
   const errorId = useId();
+  const controlsId = useId();
+  const [mobileControlsOpen, setMobileControlsOpen] = useState(false);
   const [dateEditorOpen, setDateEditorOpen] = useState(false);
   const [dateRangeDraft, setDateRangeDraft] = useState<ChartDateRange>({
     startDate: "",
@@ -85,6 +87,16 @@ export function ChartViewControls({
   const [dateRangeError, setDateRangeError] = useState<ChartDateRangeError | null>(null);
   const minDate = timestampDateInputValue(availableFrom) ?? undefined;
   const maxDate = timestampDateInputValue(availableTo) ?? undefined;
+  const rangeSummary =
+    chartTimeRange === "24h"
+      ? copy.last24Hours
+      : chartTimeRange === "7d"
+        ? copy.last7Days
+        : chartTimeRange === "all"
+          ? copy.allTime
+          : copy.customRange;
+  const layoutSummary =
+    chartLayout === "dashboard" ? copy.dashboard : copy.stacked;
 
   const choosePreset = (range: Exclude<ChartTimeRange, "custom">) => {
     setDateEditorOpen(false);
@@ -101,6 +113,7 @@ export function ChartViewControls({
     );
     setDateRangeError(null);
     setDateEditorOpen(true);
+    setMobileControlsOpen(true);
   };
   const applyDateRange = () => {
     const error = validateChartDateRange(dateRangeDraft);
@@ -115,8 +128,33 @@ export function ChartViewControls({
   };
 
   return (
-    <div className="chart-toolbar">
-      <div className="toolbar-cluster">
+    <div className="chart-controls-shell">
+      <button
+        aria-controls={controlsId}
+        aria-expanded={mobileControlsOpen}
+        aria-label={
+          mobileControlsOpen ? copy.collapseControls : copy.expandControls
+        }
+        className="chart-controls-toggle"
+        onClick={() => setMobileControlsOpen((open) => !open)}
+        type="button"
+      >
+        <span>
+          <strong>{copy.controlsTitle}</strong>
+          <small>
+            {rangeSummary} · {layoutSummary}
+          </small>
+        </span>
+        <span aria-hidden="true">⌄</span>
+      </button>
+
+      <div
+        className={
+          mobileControlsOpen ? "chart-toolbar mobile-open" : "chart-toolbar"
+        }
+        id={controlsId}
+      >
+      <div className="toolbar-cluster range-cluster">
         <span>{copy.rangeLabel}</span>
         <div className="segmented-control" role="group" aria-label={copy.rangeAria}>
           {(["24h", "7d", "all"] as const).map((range) => (
@@ -145,7 +183,7 @@ export function ChartViewControls({
           </button>
         </div>
       </div>
-      <div className="toolbar-cluster">
+      <div className="toolbar-cluster layout-cluster">
         <span>{copy.modeLabel}</span>
         <div className="segmented-control" role="group" aria-label={copy.modeAria}>
           <button
@@ -236,6 +274,7 @@ export function ChartViewControls({
           <strong>{copy.changeDateRange}</strong>
         </button>
       ) : null}
+      </div>
     </div>
   );
 }

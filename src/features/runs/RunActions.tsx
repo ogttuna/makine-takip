@@ -1,5 +1,4 @@
 import type { RunSummary } from "../../api";
-import { getRunExportUrl } from "../../api";
 import type { AppCopy, Locale } from "../../i18n";
 import { runStatusLabel, sourceKindLabel } from "../../utils/format";
 
@@ -18,11 +17,6 @@ export function RunActions({
         <span>{run ? runStatusLabel(run.status, locale) : copy.pending}</span>
         <strong>{run ? sourceKindLabel(run.source_kind, locale) : copy.none}</strong>
       </div>
-      {run ? (
-        <a className="export-link" href={getRunExportUrl(run.id)}>
-          {copy.exportCsv}
-        </a>
-      ) : null}
     </div>
   );
 }

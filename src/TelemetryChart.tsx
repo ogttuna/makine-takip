@@ -128,6 +128,7 @@ export function TelemetryChart({
   const [legendSelection, setLegendSelection] = useState<Record<string, boolean>>({});
   const chartSamples = useMemo(() => chronologicalSamples(samples), [samples]);
   const chartExtent = useMemo(() => timelineExtent(chartSamples), [chartSamples]);
+  const narrowChart = chartWidth > 0 && chartWidth < 480;
   const series = useMemo(
     () =>
       buildSeries(
@@ -243,26 +244,27 @@ export function TelemetryChart({
       color: series.colors,
       grid: {
         top: compact ? 58 : 86,
-        right: compact ? 62 : 76,
+        right: narrowChart ? 18 : compact ? 62 : 76,
         bottom: showSlider ? (compact ? 42 : 78) : 38,
-        left: 58,
+        left: narrowChart ? 46 : 58,
       },
       legend: {
         type: "scroll",
         top: 0,
-        left: 56,
-        right: 56,
+        left: narrowChart ? 10 : 56,
+        right: narrowChart ? 10 : 56,
         height: compact ? 36 : 56,
         selected: legendSelection,
         textStyle: {
           color: palette.legendText,
           fontFamily: CHART_FONT_FAMILY,
-          fontSize: compact ? 11 : 12,
+          fontSize: narrowChart ? 10 : compact ? 11 : 12,
           fontWeight: 700,
         },
       },
       tooltip: {
         trigger: "axis",
+        confine: true,
         transitionDuration: 0,
         axisPointer: {
           animation: false,
@@ -288,6 +290,7 @@ export function TelemetryChart({
         axisLabel: {
           color: palette.axisText,
           fontFamily: CHART_FONT_FAMILY,
+          fontSize: narrowChart ? 10 : 12,
           fontWeight: 600,
           formatter: (value) => formatTimelineAxis(value, locale, chartExtent?.spanMs ?? 0),
           hideOverlap: true,
@@ -303,7 +306,16 @@ export function TelemetryChart({
     };
 
     chartRef.current.setOption(option, true);
-  }, [chartExtent?.spanMs, legendSelection, locale, series, showSlider, themeMode, variant]);
+  }, [
+    chartExtent?.spanMs,
+    legendSelection,
+    locale,
+    narrowChart,
+    series,
+    showSlider,
+    themeMode,
+    variant,
+  ]);
 
   return (
     <div
@@ -343,7 +355,8 @@ function buildSeries(
 } {
   const channels = sortChannels(visibleChannels);
   const palette = chartPalette(themeMode);
-  const axisLayout = buildAxisLayout(channels, palette, locale);
+  const narrowChart = chartWidth > 0 && chartWidth < 480;
+  const axisLayout = buildAxisLayout(channels, palette, locale, narrowChart);
   const colors = channels.map((channel) => channelColor(channel, themeMode));
   const extent = timelineExtent(samples);
   const suspectLabel = locale === "en" ? "suspect" : "şüpheli";
@@ -481,7 +494,10 @@ function buildSeries(
 
   if (stateAreaTarget && processSegments.length > 0 && samples.length > 0) {
     const lastSampledAt = samples[samples.length - 1].sampled_at;
-    const plotWidth = Math.max(0, chartWidth - (variant === "compact" ? 120 : 134));
+    const plotWidth = Math.max(
+      0,
+      chartWidth - (narrowChart ? 64 : variant === "compact" ? 120 : 134),
+    );
     const stateAreas = processSegments.flatMap((segment) => {
       const finishedAt = segment.finished_at ?? lastSampledAt;
       const stateName = stateDisplayName(segment.state_code, locale);
@@ -547,6 +563,7 @@ function buildAxisLayout(
   channels: string[],
   palette: ChartPalette,
   locale: Locale,
+  narrowChart: boolean,
 ): AxisLayout {
   const axisKinds = [
     ...new Set<AxisKind>(channels.map((channel) => getChannelConfig(channel).axis)),
@@ -562,18 +579,19 @@ function buildAxisLayout(
       type: definition.scale,
       name: definition.label,
       min: definition.minimum,
-      nameGap: 18,
+      nameGap: narrowChart ? 10 : 18,
       nameTextStyle: {
         color: palette.legendText,
         fontFamily: CHART_FONT_FAMILY,
-        fontSize: 11,
+        fontSize: narrowChart ? 9 : 11,
         fontWeight: 700,
       },
       position: index % 2 === 0 ? "left" : "right",
-      offset: index > 1 ? Math.floor(index / 2) * 48 : 0,
+      offset: index > 1 ? Math.floor(index / 2) * (narrowChart ? 36 : 48) : 0,
       axisLabel: {
         color: palette.axisText,
         fontFamily: CHART_FONT_FAMILY,
+        fontSize: narrowChart ? 10 : 12,
         fontWeight: 600,
       },
       axisLine: {
